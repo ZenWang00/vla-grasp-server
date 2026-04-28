@@ -1,0 +1,18 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+
+# Local data and generated outputs
+captures/
+output_rgbd/
+output_vg/
+
+# Local model weights and caches
+models/
+
+# OS/editor noise
+.DS_Store
