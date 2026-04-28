@@ -23,6 +23,7 @@ Notes:
 - the locked `torch` / `torchvision` versions in `requirements.txt` match the currently validated CUDA-enabled environment
 - if your machine uses a different CUDA or CPU-only setup, you may need to adjust those two packages while keeping the rest of the dependency set the same
 - `Contact-GraspNet` is recommended to stay in a separate environment from this repository
+- `plotly` is used by the standalone HTML report generator
 
 ## VLM grounding step
 
@@ -175,6 +176,45 @@ python vg_roi_pipeline.py \
   --sam2-model facebook/sam2.1-hiera-small \
   --export-contact-graspnet-input
 ```
+
+## Standalone HTML grasp report
+
+After Contact-GraspNet inference writes a predictions NPZ back into the same run directory, you can generate a browser-openable HTML report without requiring a GUI session.
+
+Expected inputs:
+
+- one finished run directory containing `manifest.json`
+- the exported `contact_graspnet_input.npz`
+- one Contact-GraspNet predictions file such as `predictions_contact_graspnet_input.npz`
+
+The report generator:
+
+- loads the original RGB scene from `manifest.json` or falls back to the exported input NPZ
+- inspects the prediction NPZ schema and prints its keys and shapes
+- flattens Contact-GraspNet's per-object dictionaries into a top-k grasp list
+- projects grasp approach arrows back onto the 2D scene image
+- renders an interactive Plotly 3D point-cloud view with grasp frames and a simple gripper wireframe
+
+Example command:
+
+```bash
+python scripts/generate_grasp_report.py \
+  --run-dir output_vg/camera_data_20260428_125745_300936 \
+  --predictions-npz output_vg/camera_data_20260428_125745_300936/predictions_contact_graspnet_input.npz \
+  --top-k 12
+```
+
+Output:
+
+- `report.html` under the run directory by default
+
+Notes:
+
+- the 3D frame colors are fixed as `x/base = red`, `y/lateral = green`, `z/approach = blue`
+- the 2D arrows are projected from the same `z/approach` axis used in the 3D view
+- if `--predictions-npz` is omitted, the script will auto-pick a single `predictions*.npz` file inside the run directory
+- if the prediction schema is not recognized, the script raises an error after printing the discovered key/shape summary
+- the current implementation is aligned to the Contact-GraspNet-style fields observed so far: `pred_grasps_cam`, `scores`, `contact_pts`, `pc_full`, and optional `pc_colors`
 
 ### What is sent to the VLM
 
