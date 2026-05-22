@@ -30,7 +30,7 @@ class ParsedGraspRequest:
     frame_id: str
     rgb_shape: tuple[int, int, int]
     depth_shape: tuple[int, int]
-    T_base_gripper: np.ndarray | None  # gripper-to-base transform at capture time
+    T_base_camera: np.ndarray | None  # camera-to-base transform at capture time
 
 
 def _decode_rgb(rgb_bytes: bytes, *, source_name: str | None) -> np.ndarray:
@@ -88,12 +88,12 @@ def _decode_T4x4(json_str: str) -> np.ndarray:
     try:
         payload = json.loads(json_str)
     except json.JSONDecodeError as exc:
-        raise ValueError(f"T_base_gripper is not valid JSON: {exc}") from exc
+        raise ValueError(f"T_base_camera_json is not valid JSON: {exc}") from exc
     T = np.asarray(payload, dtype=np.float64)
     if T.shape != (4, 4):
-        raise ValueError(f"T_base_gripper must be 4×4, got shape {T.shape}")
+        raise ValueError(f"T_base_camera_json must be 4×4, got shape {T.shape}")
     if not np.all(np.isfinite(T)):
-        raise ValueError("T_base_gripper contains non-finite values")
+        raise ValueError("T_base_camera_json contains non-finite values")
     return T
 
 
@@ -110,7 +110,7 @@ def materialize_request(
     model: str,
     frame_id: str,
     capture_dir: Path,
-    T_base_gripper_json: str | None = None,
+    T_base_camera_json: str | None = None,
 ) -> ParsedGraspRequest:
     """Validate inputs and write camera_data.npy + color_preview.jpg into ``capture_dir``."""
     if not task_spec or not task_spec.strip():
@@ -125,7 +125,7 @@ def materialize_request(
     rgb = _decode_rgb(rgb_bytes, source_name=rgb_filename)
     depth = _decode_depth(depth_bytes)
     K = _decode_K(K_json)
-    T_base_gripper = _decode_T4x4(T_base_gripper_json) if T_base_gripper_json else None
+    T_base_camera = _decode_T4x4(T_base_camera_json) if T_base_camera_json else None
 
     if rgb.shape[:2] != depth.shape:
         raise ValueError(
@@ -154,5 +154,5 @@ def materialize_request(
         frame_id=frame_id.strip(),
         rgb_shape=(int(rgb.shape[0]), int(rgb.shape[1]), 3),
         depth_shape=(int(depth.shape[0]), int(depth.shape[1])),
-        T_base_gripper=T_base_gripper,
+        T_base_camera=T_base_camera,
     )
