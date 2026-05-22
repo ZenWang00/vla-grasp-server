@@ -116,13 +116,13 @@ async def grasp(
     ),
     provider: str | None = Form(None, description="Optional VLM provider override."),
     model: str | None = Form(None, description="Optional VLM model override."),
-    T_base_gripper: str | None = Form(
+    T_base_camera: str | None = Form(
         None,
         description=(
-            "Optional 4x4 gripper-to-base transform at image capture time, JSON encoded "
-            "(e.g. from FK or TF lookup). When provided together with the server-side "
-            "GRASP_T_GRIPPER_CAMERA config, each grasp also includes a 'base_frame' "
-            "field with the pose expressed in the robot base frame."
+            "Optional 4x4 camera-to-base transform at image capture time, JSON encoded "
+            "(queried from the ROS2 TF tree at the moment of image capture). "
+            "When provided, each grasp also includes a 'base_frame' field with the pose "
+            "expressed in the robot base frame."
         ),
     ),
 ) -> JSONResponse:
@@ -155,7 +155,7 @@ async def grasp(
             model=model or config.model,
             frame_id=frame_id,
             capture_dir=capture_dir,
-            T_base_gripper_json=T_base_gripper,
+            T_base_camera_json=T_base_camera,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -200,23 +200,12 @@ async def grasp(
             ) from exc
 
         prediction_npzs = predicted_npz_paths(pipeline_result.exported_npzs)
-        if config.T_gripper_camera is not None and parsed.T_base_gripper is None:
-            logger.warning(
-                "GRASP_T_GRIPPER_CAMERA is configured but T_base_gripper was not provided "
-                "in this request; base_frame output will be omitted."
-            )
-        if config.T_gripper_camera is None and parsed.T_base_gripper is not None:
-            logger.warning(
-                "T_base_gripper was provided but GRASP_T_GRIPPER_CAMERA is not configured; "
-                "base_frame output will be omitted."
-            )
         try:
             grasps_json = await asyncio.to_thread(
                 select_top_k_grasps,
                 prediction_npzs,
                 parsed.top_k,
-                T_gripper_camera=config.T_gripper_camera,
-                T_base_gripper=parsed.T_base_gripper,
+                T_base_camera=parsed.T_base_camera,
             )
         except (FileNotFoundError, ValueError) as exc:
             raise HTTPException(

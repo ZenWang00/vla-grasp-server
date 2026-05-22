@@ -123,23 +123,18 @@ def select_top_k_grasps(
     predictions_npzs: list[Path],
     top_k: int,
     *,
-    T_gripper_camera: np.ndarray | None = None,
-    T_base_gripper: np.ndarray | None = None,
+    T_base_camera: np.ndarray | None = None,
 ) -> list[dict[str, Any]]:
     """Merge predictions across candidates, sort by score, return JSON-ready top-K.
 
-    If both T_gripper_camera (static, from config) and T_base_gripper (dynamic, from request)
-    are provided, each grasp also includes a 'base_frame' field with the pose in robot base frame:
-        T_grasp_base = T_base_gripper @ T_gripper_camera @ T_grasp_camera
+    If T_base_camera is provided (camera-to-base transform queried from ROS2 TF at capture time),
+    each grasp also includes a 'base_frame' field:
+        T_grasp_base = T_base_camera @ T_grasp_camera
     """
     if top_k < 1:
         raise ValueError("top_k must be >= 1")
     if not predictions_npzs:
         raise ValueError("predictions_npzs is empty")
-
-    T_base_camera: np.ndarray | None = None
-    if T_gripper_camera is not None and T_base_gripper is not None:
-        T_base_camera = T_base_gripper @ T_gripper_camera
 
     grasps = normalize_predictions_multi(predictions_npzs)
     selected = grasps[:top_k]
