@@ -116,15 +116,6 @@ async def grasp(
     ),
     provider: str | None = Form(None, description="Optional VLM provider override."),
     model: str | None = Form(None, description="Optional VLM model override."),
-    T_base_camera: str | None = Form(
-        None,
-        description=(
-            "Optional 4x4 camera-to-base transform at image capture time, JSON encoded "
-            "(queried from the ROS2 TF tree at the moment of image capture). "
-            "When provided, each grasp also includes a 'base_frame' field with the pose "
-            "expressed in the robot base frame."
-        ),
-    ),
 ) -> JSONResponse:
     config, worker, request_lock = _get_state(app)
     if not worker.ready:
@@ -155,7 +146,6 @@ async def grasp(
             model=model or config.model,
             frame_id=frame_id,
             capture_dir=capture_dir,
-            T_base_camera_json=T_base_camera,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -205,7 +195,6 @@ async def grasp(
                 select_top_k_grasps,
                 prediction_npzs,
                 parsed.top_k,
-                T_base_camera=parsed.T_base_camera,
             )
         except (FileNotFoundError, ValueError) as exc:
             raise HTTPException(
