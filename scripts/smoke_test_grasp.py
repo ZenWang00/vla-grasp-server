@@ -72,21 +72,25 @@ def post_grasp(
     top_k: int,
     num_candidates: int,
     timeout_s: float,
+    T_base_gripper_json: str | None = None,
 ) -> dict:
     url = server_url.rstrip("/") + "/grasp"
+    data: dict = {
+        "K": K_json,
+        "task_spec": task_spec,
+        "frame_id": frame_id,
+        "top_k": str(top_k),
+        "num_candidates": str(num_candidates),
+    }
+    if T_base_gripper_json is not None:
+        data["T_base_gripper"] = T_base_gripper_json
     response = requests.post(
         url,
         files={
             "rgb": ("rgb.png", rgb_png_bytes, "image/png"),
             "depth": ("depth.npy", depth_npy_bytes, "application/octet-stream"),
         },
-        data={
-            "K": K_json,
-            "task_spec": task_spec,
-            "frame_id": frame_id,
-            "top_k": str(top_k),
-            "num_candidates": str(num_candidates),
-        },
+        data=data,
         timeout=timeout_s,
     )
     if response.status_code != 200:
@@ -127,10 +131,20 @@ def summarize_grasp(grasp: dict, rank: int) -> str:
     width_str = f"{width:.4f}m" if isinstance(width, (int, float)) else "n/a"
     pos_str = ", ".join(f"{v:.3f}" for v in pos) if pos else "?"
     quat_str = ", ".join(f"{v:.3f}" for v in quat) if quat else "?"
-    return (
+    lines = [
         f"  #{rank} score={score:.4f}  "
         f"pos=[{pos_str}]  quat_xyzw=[{quat_str}]  width={width_str}"
-    )
+    ]
+    if "base_frame" in grasp:
+        bf = grasp["base_frame"]
+        bf_pos = bf.get("position_xyz", [])
+        bf_quat = bf.get("quaternion_xyzw", [])
+        bf_pos_str = ", ".join(f"{v:.3f}" for v in bf_pos) if bf_pos else "?"
+        bf_quat_str = ", ".join(f"{v:.3f}" for v in bf_quat) if bf_quat else "?"
+        lines.append(
+            f"       base_frame: pos=[{bf_pos_str}]  quat_xyzw=[{bf_quat_str}]"
+        )
+    return "\n".join(lines)
 
 
 def main() -> int:
@@ -172,6 +186,18 @@ def main() -> int:
         action="store_true",
         help="Skip the GET /health step (still useful when the server is intentionally degraded).",
     )
+    parser.add_argument(
+        "--T-base-gripper",
+        type=str,
+        default=None,
+        metavar="JSON",
+        help=(
+            "Optional 4x4 gripper-to-base transform at capture time, JSON encoded. "
+            "When provided (and GRASP_T_GRIPPER_CAMERA is configured on the server), "
+            "each grasp will also include a 'base_frame' field. "
+            "Example: '[[1,0,0,0.3],[0,1,0,0],[0,0,1,0.5],[0,0,0,1]]'"
+        ),
+    )
     args = parser.parse_args()
 
     capture_dir = args.capture_dir.resolve()
@@ -189,6 +215,8 @@ def main() -> int:
     print(f"rgb_png: {len(rgb_png)} bytes, depth_npy: {len(depth_npy)} bytes, K: {K_json}")
     print("posting /grasp (this can take >30s the first time)...")
 
+    if args.T_base_gripper:
+        print(f"T_base_gripper: {args.T_base_gripper}")
     payload = post_grasp(
         server_url=args.server_url,
         rgb_png_bytes=rgb_png,
@@ -199,6 +227,7 @@ def main() -> int:
         top_k=args.top_k,
         num_candidates=args.num_candidates,
         timeout_s=args.timeout_s,
+        T_base_gripper_json=args.T_base_gripper,
     )
 
     grasps = payload.get("grasps") or []

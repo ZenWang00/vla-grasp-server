@@ -81,13 +81,17 @@ def _candidate_index_from_npz(predictions_npz: Path) -> int | None:
     return int(match.group(1))
 
 
-def _serialize_grasp(grasp: NormalizedGrasp) -> dict[str, Any]:
+def _serialize_grasp(
+    grasp: NormalizedGrasp,
+    *,
+    T_base_camera: np.ndarray | None = None,
+) -> dict[str, Any]:
     pose = np.asarray(grasp.transform, dtype=np.float64)
     qx, qy, qz, qw = _rotation_to_quaternion_xyzw(pose[:3, :3])
     candidate_index = (
         _candidate_index_from_npz(grasp.source_npz) if grasp.source_npz is not None else None
     )
-    return {
+    result: dict[str, Any] = {
         "score": float(grasp.score),
         "pose_4x4": pose.tolist(),
         "position_xyz": pose[:3, 3].astype(float).tolist(),
@@ -103,14 +107,40 @@ def _serialize_grasp(grasp: NormalizedGrasp) -> dict[str, Any]:
             ),
         },
     }
+    if T_base_camera is not None:
+        T_grasp_base = T_base_camera @ pose
+        bqx, bqy, bqz, bqw = _rotation_to_quaternion_xyzw(T_grasp_base[:3, :3])
+        result["base_frame"] = {
+            "pose_4x4": T_grasp_base.tolist(),
+            "position_xyz": T_grasp_base[:3, 3].astype(float).tolist(),
+            "quaternion_xyzw": [bqx, bqy, bqz, bqw],
+            "approach_dir_xyz": T_grasp_base[:3, 2].astype(float).tolist(),
+        }
+    return result
 
 
-def select_top_k_grasps(predictions_npzs: list[Path], top_k: int) -> list[dict[str, Any]]:
-    """Merge predictions across candidates, sort by score, return JSON-ready top-K."""
+def select_top_k_grasps(
+    predictions_npzs: list[Path],
+    top_k: int,
+    *,
+    T_gripper_camera: np.ndarray | None = None,
+    T_base_gripper: np.ndarray | None = None,
+) -> list[dict[str, Any]]:
+    """Merge predictions across candidates, sort by score, return JSON-ready top-K.
+
+    If both T_gripper_camera (static, from config) and T_base_gripper (dynamic, from request)
+    are provided, each grasp also includes a 'base_frame' field with the pose in robot base frame:
+        T_grasp_base = T_base_gripper @ T_gripper_camera @ T_grasp_camera
+    """
     if top_k < 1:
         raise ValueError("top_k must be >= 1")
     if not predictions_npzs:
         raise ValueError("predictions_npzs is empty")
+
+    T_base_camera: np.ndarray | None = None
+    if T_gripper_camera is not None and T_base_gripper is not None:
+        T_base_camera = T_base_gripper @ T_gripper_camera
+
     grasps = normalize_predictions_multi(predictions_npzs)
     selected = grasps[:top_k]
-    return [_serialize_grasp(g) for g in selected]
+    return [_serialize_grasp(g, T_base_camera=T_base_camera) for g in selected]
