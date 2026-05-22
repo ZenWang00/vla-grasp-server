@@ -6,25 +6,40 @@ import numpy as np
 from PIL import Image
 
 
-def backproject_roi_points(
-    cropped_depth: np.ndarray,
+def backproject_depth_with_mask(
+    depth: np.ndarray,
     K: np.ndarray,
-    xmin: int,
-    ymin: int,
+    *,
+    mask: np.ndarray | None = None,
+    xmin: int = 0,
+    ymin: int = 0,
 ) -> np.ndarray:
-    """Back-project ROI depth to camera-frame points, returning float32 (N, 3)."""
-    if cropped_depth.size == 0:
+    """Back-project ``depth`` to camera-frame points, optionally restricted to ``mask``.
+
+    ``mask`` must broadcast to ``depth.shape`` and is combined with the validity
+    check ``isfinite(depth) & (depth > 0)``. ``xmin``/``ymin`` shift the pixel
+    grid so the function can also serve cropped depth tiles (legacy ROI usage).
+    Returns float32 ``(N, 3)``.
+    """
+    if depth.size == 0:
         return np.zeros((0, 3), dtype=np.float32)
 
     K = np.asarray(K, dtype=np.float64)
     fx, fy = float(K[0, 0]), float(K[1, 1])
     cx, cy = float(K[0, 2]), float(K[1, 2])
 
-    h, w = cropped_depth.shape
+    h, w = depth.shape
     ys_local, xs_local = np.indices((h, w), dtype=np.float64)
-    Z = np.asarray(cropped_depth, dtype=np.float64)
+    Z = np.asarray(depth, dtype=np.float64)
 
     valid = np.isfinite(Z) & (Z > 0.0)
+    if mask is not None:
+        mask_arr = np.asarray(mask)
+        if mask_arr.shape != depth.shape:
+            raise ValueError(
+                f"mask shape {mask_arr.shape} does not match depth shape {depth.shape}"
+            )
+        valid = valid & mask_arr.astype(bool)
     if not np.any(valid):
         return np.zeros((0, 3), dtype=np.float32)
 
@@ -37,21 +52,60 @@ def backproject_roi_points(
     return points
 
 
-def render_pointcloud_3d_png(points: np.ndarray, path: Path, width: int = 960, height: int = 720) -> None:
-    """Render point cloud PNG; prefers Open3D offscreen, falls back to Matplotlib if unavailable."""
+def backproject_roi_points(
+    cropped_depth: np.ndarray,
+    K: np.ndarray,
+    xmin: int,
+    ymin: int,
+) -> np.ndarray:
+    """Legacy thin wrapper around :func:`backproject_depth_with_mask` for cropped tiles."""
+    return backproject_depth_with_mask(cropped_depth, K, mask=None, xmin=xmin, ymin=ymin)
+
+
+def _render_pointcloud_3d_matplotlib(
+    points: np.ndarray, path: Path, *, width: int = 960, height: int = 720
+) -> None:
     try:
-        import open3d as o3d
+        import matplotlib
+
+        matplotlib.use("Agg")
+        from matplotlib import pyplot as plt
     except Exception as exc:
         raise RuntimeError(
-            "Open3D is required to generate pointcloud_3d.png. "
-            "Install it in this environment first (e.g. `pip install open3d`)."
+            "Matplotlib is required to render pointcloud_3d.png when Open3D is unavailable. "
+            "Install it with `pip install matplotlib`."
         ) from exc
 
+    fig = plt.figure(figsize=(width / 100.0, height / 100.0), dpi=100)
+    ax = fig.add_subplot(111, projection="3d")
+    xyz = points.astype(np.float64, copy=False)
+    max_points = 30000
+    if xyz.shape[0] > max_points:
+        step = max(1, xyz.shape[0] // max_points)
+        xyz = xyz[::step]
+    ax.scatter(xyz[:, 0], xyz[:, 1], xyz[:, 2], s=0.5, c=xyz[:, 2], cmap="viridis")
+    ax.set_xlabel("X")
+    ax.set_ylabel("Y")
+    ax.set_zlabel("Z")
+    ax.set_title("ROI Point Cloud")
+    fig.tight_layout()
+    fig.savefig(str(path))
+    plt.close(fig)
+
+
+def render_pointcloud_3d_png(points: np.ndarray, path: Path, width: int = 960, height: int = 720) -> None:
+    """Render point cloud PNG; prefers Open3D offscreen, falls back to Matplotlib if unavailable."""
     path.parent.mkdir(parents=True, exist_ok=True)
     if points.ndim != 2 or points.shape[1] != 3:
         raise ValueError(f"Expected points shape (N,3), got {points.shape}")
     if points.shape[0] == 0:
         raise ValueError("Empty point cloud; cannot render pointcloud_3d.png")
+
+    try:
+        import open3d as o3d
+    except Exception:
+        _render_pointcloud_3d_matplotlib(points, path, width=width, height=height)
+        return
 
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(points.astype(np.float64, copy=False))
@@ -71,33 +125,7 @@ def render_pointcloud_3d_png(points: np.ndarray, path: Path, width: int = 960, h
         finally:
             vis.destroy_window()
 
-    # Fallback for headless servers where Open3D cannot create GLFW/OSMesa context.
-    try:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        from matplotlib import pyplot as plt
-    except Exception as exc:
-        raise RuntimeError(
-            "Open3D could not render offscreen and Matplotlib fallback is unavailable. "
-            "Install OSMesa/EGL support for Open3D or install Matplotlib."
-        ) from exc
-
-    fig = plt.figure(figsize=(width / 100.0, height / 100.0), dpi=100)
-    ax = fig.add_subplot(111, projection="3d")
-    xyz = points.astype(np.float64, copy=False)
-    max_points = 30000
-    if xyz.shape[0] > max_points:
-        step = max(1, xyz.shape[0] // max_points)
-        xyz = xyz[::step]
-    ax.scatter(xyz[:, 0], xyz[:, 1], xyz[:, 2], s=0.5, c=xyz[:, 2], cmap="viridis")
-    ax.set_xlabel("X")
-    ax.set_ylabel("Y")
-    ax.set_zlabel("Z")
-    ax.set_title("ROI Point Cloud")
-    fig.tight_layout()
-    fig.savefig(str(path))
-    plt.close(fig)
+    _render_pointcloud_3d_matplotlib(points, path, width=width, height=height)
 
 
 def project_points_to_rgb_overlay_png(

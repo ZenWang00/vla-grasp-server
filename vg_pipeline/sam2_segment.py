@@ -79,21 +79,21 @@ def refine_mask_with_depth(
 def run_sam2_segmentation(
     rgb: np.ndarray,
     *,
-    object_box: tuple[int, int, int, int],
-    object_point: tuple[int, int] | None = None,
+    box: tuple[int, int, int, int],
+    point: tuple[int, int] | None = None,
     model_name: str = "facebook/sam2.1-hiera-small",
     device: str | None = None,
     depth: np.ndarray | None = None,
 ) -> Sam2SegmentationResult:
     processor, model, torch = _load_sam2_model(model_name, _resolve_device(device))
     pil_image = rgb_to_pil(rgb)
-    ymin, xmin, ymax, xmax = object_box
+    ymin, xmin, ymax, xmax = box
 
     input_boxes = [[[float(xmin), float(ymin), float(xmax), float(ymax)]]]
     input_points = None
     input_labels = None
-    if object_point is not None:
-        py, px = object_point
+    if point is not None:
+        py, px = point
         input_points = [[[[float(px), float(py)]]]]
         input_labels = [[[1]]]
 
@@ -116,7 +116,7 @@ def run_sam2_segmentation(
     )[0]
     mask = _extract_binary_mask(masks[0] if isinstance(masks, list) else masks)
     if depth is not None:
-        mask = refine_mask_with_depth(mask, depth, object_box=object_box)
+        mask = refine_mask_with_depth(mask, depth, object_box=box)
     segmap = np.zeros(mask.shape, dtype=np.uint8)
     segmap[mask.astype(bool)] = 1
     return Sam2SegmentationResult(
@@ -125,6 +125,46 @@ def run_sam2_segmentation(
         model_name=model_name,
         device=str(model.device),
         positive_pixels=int(mask.astype(bool).sum()),
+    )
+
+
+def run_sam2_global(
+    rgb: np.ndarray,
+    *,
+    object_box: tuple[int, int, int, int],
+    object_point: tuple[int, int] | None = None,
+    model_name: str = "facebook/sam2.1-hiera-small",
+    device: str | None = None,
+    depth: np.ndarray | None = None,
+) -> Sam2SegmentationResult:
+    """SAM2 pass on the whole-object box to produce a global mask."""
+    return run_sam2_segmentation(
+        rgb,
+        box=object_box,
+        point=object_point,
+        model_name=model_name,
+        device=device,
+        depth=depth,
+    )
+
+
+def run_sam2_local(
+    rgb: np.ndarray,
+    *,
+    grasp_region_box: tuple[int, int, int, int],
+    grasp_point: tuple[int, int] | None = None,
+    model_name: str = "facebook/sam2.1-hiera-small",
+    device: str | None = None,
+    depth: np.ndarray | None = None,
+) -> Sam2SegmentationResult:
+    """SAM2 pass on a grasp-region box to produce a tight graspable-part mask."""
+    return run_sam2_segmentation(
+        rgb,
+        box=grasp_region_box,
+        point=grasp_point,
+        model_name=model_name,
+        device=device,
+        depth=depth,
     )
 
 

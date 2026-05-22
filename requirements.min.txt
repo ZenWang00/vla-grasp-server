@@ -1,0 +1,13 @@
+# Minimal dependencies for running vg_roi_pipeline with remote providers
+# (gemini/openai) on ARM64/ROS2-friendly isolated environments.
+#
+# Notes:
+# - intentionally excludes open3d (often unavailable on aarch64)
+# - intentionally excludes CUDA-pinned torch/torchvision wheels
+# - if you use --provider qwen_local or --enable-sam2, install torch separately
+
+numpy==2.2.6
+Pillow==12.1.1
+matplotlib==3.10.8
+transformers==5.3.0
+plotly==6.7.0

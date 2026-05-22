@@ -84,7 +84,7 @@ def main() -> None:
     parser.add_argument(
         "--schema-version",
         type=str,
-        default="qwen_vg_dual_box_v2",
+        default="vla_dual_sam2_v1",
         help="Written to manifest.json",
     )
     parser.add_argument(
@@ -94,14 +94,16 @@ def main() -> None:
         help="How many grasp candidates the VLM should propose, ordered best-first.",
     )
     parser.add_argument(
-        "--no-render-pointcloud3d",
+        "--no-clean-local-3d-render",
         action="store_true",
-        help="Disable pointcloud_3d_XXX.png rendering (enabled by default).",
+        help="Skip per-candidate pure_target_pointcloud_3d_XXX.png rendering (enabled by default).",
     )
     parser.add_argument(
         "--enable-sam2",
         action="store_true",
-        help="Run local SAM2 segmentation from VLM object_box/object_point prompts.",
+        help="Run dual SAM2 (global whole-object + per-candidate graspable part), build the clean "
+        "local 3D point cloud, and unlock the Contact-GraspNet export. Without it, only the VLM "
+        "outputs are recorded.",
     )
     parser.add_argument(
         "--sam2-model",
@@ -118,18 +120,26 @@ def main() -> None:
     parser.add_argument(
         "--export-contact-graspnet-input",
         action="store_true",
-        help="Export a Contact-GraspNet-ready .npz with depth/K/segmap/rgb after SAM2 succeeds.",
+        help="Export one Contact-GraspNet-ready .npz per grasp candidate with depth/K/rgb, "
+        "segmap=tight_grasp_mask, and an extra global_mask key when SAM2 global succeeds.",
     )
     parser.add_argument(
-        "--contact-graspnet-export-name",
+        "--contact-graspnet-export-template",
         type=str,
-        default="contact_graspnet_input.npz",
-        help="Filename for the optional Contact-GraspNet export under the run output directory.",
+        default="contact_graspnet_input_{idx:03d}.npz",
+        help="Filename template for the per-candidate Contact-GraspNet export. Must contain "
+        "'{idx' (e.g. {idx:03d}) so multiple candidates do not collide.",
     )
     args = parser.parse_args()
 
     if args.num_candidates < 1:
         parser.error("--num-candidates must be >= 1")
+
+    if "{idx" not in args.contact_graspnet_export_template:
+        parser.error(
+            "--contact-graspnet-export-template must include '{idx' so per-candidate exports "
+            "do not overwrite each other (e.g. contact_graspnet_input_{idx:03d}.npz)."
+        )
 
     if args.capture_dir is not None:
         if args.npy is not None or args.rgbd_stem is not None or args.scene_image is not None or args.depth_aux_image is not None:
@@ -164,12 +174,12 @@ def main() -> None:
         code_execution=args.code_execution,
         schema_version=args.schema_version,
         num_candidates=args.num_candidates,
-        render_pointcloud_3d=not args.no_render_pointcloud3d,
+        render_pointcloud_3d=not args.no_clean_local_3d_render,
         enable_sam2=args.enable_sam2,
         sam2_model=args.sam2_model,
         sam2_device=args.sam2_device,
         export_contact_graspnet_input=args.export_contact_graspnet_input,
-        contact_graspnet_export_name=args.contact_graspnet_export_name,
+        contact_graspnet_export_template=args.contact_graspnet_export_template,
         run_id=run_id,
         scene_image_path=args.scene_image.resolve() if args.scene_image else None,
         depth_aux_image_path=args.depth_aux_image.resolve() if args.depth_aux_image else None,

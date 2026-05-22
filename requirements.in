@@ -6,3 +6,7 @@ torch
 torchvision
 transformers
 plotly
+fastapi
+uvicorn[standard]
+python-multipart
+requests
