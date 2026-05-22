@@ -12,8 +12,16 @@
 #   CONTACT_GRASPNET_CKPT      default: $CONTACT_GRASPNET_REPO/contact_graspnet_pytorch/checkpoints/contact_graspnet
 #   CONTACT_GRASPNET_PYTHON    optional explicit python path (skips `conda run`)
 #   GEMINI_API_KEY / GOOGLE_API_KEY   required for the VLM step
+#   GRASP_T_GRIPPER_CAMERA             4x4 camera-to-gripper transform (JSON, row-major)
+#                                      default: identity (no offset correction)
 
 set -euo pipefail
+
+# Static hand-eye calibration: transforms a point from camera frame to gripper frame.
+# Edit the matrix below to match your measured camera-to-gripper offset.
+# Translation unit: meters. Example: camera is 5cm in X, 2cm in Y, -3cm in Z from gripper.
+GRASP_T_GRIPPER_CAMERA="${GRASP_T_GRIPPER_CAMERA:-[[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]}"
+export GRASP_T_GRIPPER_CAMERA
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VG_PYTHON="${VG_PYTHON:-$REPO_ROOT/.venv/bin/python}"

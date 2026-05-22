@@ -58,7 +58,7 @@ def build_grasp_task_spec(task_spec: str) -> str:
     )
 
 
-def build_grounding_prompt(task_spec: str, w: int, h: int, num_candidates: int = 3) -> str:
+def build_grounding_prompt(task_spec: str, w: int, h: int, num_candidates: int = 1) -> str:
     return PLAN_B_PROMPT_TEMPLATE.format(
         task_spec=build_grasp_task_spec(task_spec),
         w=w,
