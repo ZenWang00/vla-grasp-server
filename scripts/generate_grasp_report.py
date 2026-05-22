@@ -7,8 +7,8 @@ import colorsys
 import html
 import io
 import json
+import re
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -19,42 +19,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from vg_pipeline.geometry import backproject_roi_points
-
-
-GRIPPER_DEPTH_METERS = 0.1034
-FINGER_LENGTH_METERS = 0.06
-
-
-@dataclass(frozen=True)
-class NormalizedGrasp:
-    segment_id: int
-    grasp_index: int
-    score: float
-    transform: np.ndarray
-    center_xyz: np.ndarray
-    contact_point_xyz: np.ndarray | None
-    width_m: float | None
-
-    @property
-    def rotation(self) -> np.ndarray:
-        return self.transform[:3, :3]
-
-    @property
-    def translation(self) -> np.ndarray:
-        return self.transform[:3, 3]
-
-    @property
-    def base_dir(self) -> np.ndarray:
-        return self.rotation[:, 0]
-
-    @property
-    def lateral_dir(self) -> np.ndarray:
-        return self.rotation[:, 1]
-
-    @property
-    def approach_dir(self) -> np.ndarray:
-        return self.rotation[:, 2]
+from vg_pipeline.geometry import backproject_depth_with_mask
+from vg_pipeline.grasp_results import (
+    FINGER_LENGTH_METERS,
+    GRIPPER_DEPTH_METERS,
+    NormalizedGrasp,
+    normalize_predictions,
+    summarize_npz,
+)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -116,116 +88,62 @@ def _guess_predictions_path(run_dir: Path) -> Path:
     )
 
 
-def _summarize_npz(npz: np.lib.npyio.NpzFile) -> list[dict[str, Any]]:
-    summary: list[dict[str, Any]] = []
-    for key in npz.files:
-        value = npz[key]
-        item: dict[str, Any] = {
-            "key": key,
-            "dtype": str(getattr(value, "dtype", type(value).__name__)),
-            "shape": list(getattr(value, "shape", ())),
-        }
-        if isinstance(value, np.ndarray) and value.dtype == object and value.shape == ():
-            obj = value.item()
-            if isinstance(obj, dict):
-                item["object_dict_keys"] = [int(k) for k in obj.keys()]
-                item["object_dict_shapes"] = {
-                    str(int(k)): list(np.asarray(v).shape) for k, v in obj.items()
-                }
-        summary.append(item)
-    return summary
-
-
-def _require_object_dict(npz: np.lib.npyio.NpzFile, key: str) -> dict[int, np.ndarray]:
-    if key not in npz.files:
-        raise KeyError(f"Prediction NPZ missing required key {key!r}")
-    value = npz[key]
-    if not (isinstance(value, np.ndarray) and value.dtype == object and value.shape == ()):
-        raise ValueError(f"Expected {key!r} to be a scalar object array containing a dict, got shape={value.shape}")
-    payload = value.item()
-    if not isinstance(payload, dict):
-        raise ValueError(f"Expected {key!r} to hold a dict, got {type(payload).__name__}")
-    normalized: dict[int, np.ndarray] = {}
-    for raw_key, raw_value in payload.items():
-        normalized[int(raw_key)] = np.asarray(raw_value)
-    return normalized
-
-
-def _derive_width(transform: np.ndarray, contact_point: np.ndarray | None) -> float | None:
-    if contact_point is None:
+def _infer_candidate_index(predictions_npz: Path) -> int | None:
+    match = re.search(r"(\d+)(?=\.npz$)", predictions_npz.name)
+    if match is None:
         return None
-    base_dir = transform[:3, 0]
-    approach_dir = transform[:3, 2]
-    center = transform[:3, 3]
-    width = 2.0 * float(np.dot(center - contact_point + (GRIPPER_DEPTH_METERS * approach_dir), base_dir))
-    if not np.isfinite(width):
+    return int(match.group(1))
+
+
+def _list_contact_graspnet_exports(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = manifest.get("contact_graspnet_export")
+    if isinstance(raw, list):
+        return [entry for entry in raw if isinstance(entry, dict)]
+    if isinstance(raw, dict):
+        return [raw]
+    return []
+
+
+def _select_contact_export_entry(
+    entries: list[dict[str, Any]],
+    candidate_index: int | None,
+) -> dict[str, Any] | None:
+    if not entries:
         return None
-    return abs(width)
+    if candidate_index is not None:
+        for entry in entries:
+            if entry.get("index") == candidate_index:
+                return entry
+    for entry in entries:
+        if entry.get("status") == "ok" and entry.get("path"):
+            return entry
+    return entries[0]
 
 
-def _normalize_predictions(npz_path: Path) -> tuple[list[NormalizedGrasp], list[dict[str, Any]]]:
-    with np.load(npz_path, allow_pickle=True) as predictions_npz:
-        schema_summary = _summarize_npz(predictions_npz)
-        pred_grasps = _require_object_dict(predictions_npz, "pred_grasps_cam")
-        scores = _require_object_dict(predictions_npz, "scores")
-        contact_pts = _require_object_dict(predictions_npz, "contact_pts") if "contact_pts" in predictions_npz.files else {}
-
-    grasps: list[NormalizedGrasp] = []
-    for segment_id, transforms in pred_grasps.items():
-        transforms = np.asarray(transforms, dtype=np.float32)
-        segment_scores = np.asarray(scores.get(segment_id), dtype=np.float32)
-        if transforms.ndim != 3 or transforms.shape[1:] != (4, 4):
-            raise ValueError(
-                f"Unexpected pred_grasps_cam[{segment_id}] shape {transforms.shape}; expected (N, 4, 4)."
-            )
-        if segment_scores.shape != (transforms.shape[0],):
-            raise ValueError(
-                f"Unexpected scores[{segment_id}] shape {segment_scores.shape}; expected ({transforms.shape[0]},)."
-            )
-        segment_contacts = None
-        if segment_id in contact_pts:
-            segment_contacts = np.asarray(contact_pts[segment_id], dtype=np.float32)
-            if segment_contacts.shape != (transforms.shape[0], 3):
-                raise ValueError(
-                    f"Unexpected contact_pts[{segment_id}] shape {segment_contacts.shape}; "
-                    f"expected ({transforms.shape[0]}, 3)."
-                )
-
-        for grasp_index in range(transforms.shape[0]):
-            transform = transforms[grasp_index]
-            contact_point = segment_contacts[grasp_index] if segment_contacts is not None else None
-            grasps.append(
-                NormalizedGrasp(
-                    segment_id=segment_id,
-                    grasp_index=grasp_index,
-                    score=float(segment_scores[grasp_index]),
-                    transform=transform,
-                    center_xyz=transform[:3, 3].copy(),
-                    contact_point_xyz=None if contact_point is None else contact_point.copy(),
-                    width_m=_derive_width(transform, contact_point),
-                )
-            )
-
-    if not grasps:
-        raise ValueError(f"No grasps found in {npz_path}")
-
-    grasps.sort(key=lambda item: item.score, reverse=True)
-    return grasps, schema_summary
-
-
-def _load_contact_input_npz(run_dir: Path, manifest: dict[str, Any]) -> dict[str, np.ndarray]:
-    export_info = manifest.get("contact_graspnet_export") or {}
-    export_path = _resolve_existing_path(run_dir, export_info.get("path"))
+def _load_contact_input_npz(
+    run_dir: Path,
+    manifest: dict[str, Any],
+    candidate_index: int | None,
+) -> tuple[dict[str, np.ndarray], int | None]:
+    entries = _list_contact_graspnet_exports(manifest)
+    entry = _select_contact_export_entry(entries, candidate_index)
+    if entry is None:
+        raise FileNotFoundError(
+            "Could not locate any Contact-GraspNet input NPZ from manifest['contact_graspnet_export']."
+        )
+    export_path = _resolve_existing_path(run_dir, entry.get("path"))
     if export_path is None:
         raise FileNotFoundError(
-            "Could not locate Contact-GraspNet input NPZ from manifest['contact_graspnet_export']['path']."
+            f"Contact-GraspNet input NPZ recorded in manifest does not exist: {entry.get('path')}"
         )
     with np.load(export_path) as data:
         required_keys = {"depth", "K", "rgb"}
         missing = required_keys.difference(data.files)
         if missing:
             raise KeyError(f"Input NPZ {export_path} is missing keys: {sorted(missing)}")
-        return {key: np.asarray(data[key]) for key in data.files}
+        loaded = {key: np.asarray(data[key]) for key in data.files}
+    selected_index = entry.get("index")
+    return loaded, int(selected_index) if isinstance(selected_index, int) else None
 
 
 def _load_rgb_image(path: Path) -> np.ndarray:
@@ -266,7 +184,46 @@ def _sample_indices(count: int, max_points: int) -> np.ndarray:
     return np.arange(0, count, step, dtype=np.int64)[:max_points]
 
 
-def _build_scene_point_cloud(contact_input: dict[str, np.ndarray], predictions_npz_path: Path) -> tuple[np.ndarray, np.ndarray | None]:
+def _load_pure_target_pointcloud(
+    run_dir: Path,
+    manifest: dict[str, Any],
+    candidate_index: int | None,
+) -> np.ndarray | None:
+    entries = manifest.get("clean_local_3d") or []
+    if not isinstance(entries, list):
+        return None
+    entry = None
+    if candidate_index is not None:
+        for item in entries:
+            if isinstance(item, dict) and item.get("index") == candidate_index:
+                entry = item
+                break
+    if entry is None:
+        for item in entries:
+            if isinstance(item, dict) and item.get("status") == "ok":
+                entry = item
+                break
+    if entry is None:
+        return None
+    rel = (entry.get("paths") or {}).get("pure_target_pointcloud")
+    path = _resolve_existing_path(run_dir, rel)
+    if path is None:
+        return None
+    points = np.load(path)
+    if points.ndim != 2 or points.shape[1] != 3:
+        return None
+    return np.asarray(points, dtype=np.float32)
+
+
+def _build_scene_point_cloud(
+    contact_input: dict[str, np.ndarray],
+    predictions_npz_path: Path,
+    *,
+    pure_target_points: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray | None]:
+    if pure_target_points is not None and pure_target_points.shape[0] > 0:
+        return pure_target_points, None
+
     with np.load(predictions_npz_path, allow_pickle=True) as predictions_npz:
         if "pc_full" in predictions_npz.files:
             points = np.asarray(predictions_npz["pc_full"], dtype=np.float32)
@@ -278,7 +235,7 @@ def _build_scene_point_cloud(contact_input: dict[str, np.ndarray], predictions_n
     depth = np.asarray(contact_input["depth"], dtype=np.float32)
     K = np.asarray(contact_input["K"], dtype=np.float64)
     rgb = np.asarray(contact_input["rgb"], dtype=np.uint8)[:, :, ::-1].copy()
-    points = backproject_roi_points(depth, K, xmin=0, ymin=0)
+    points = backproject_depth_with_mask(depth, K)
     valid = np.isfinite(depth) & (depth > 0.0)
     colors = rgb[valid]
     return points, colors
@@ -524,15 +481,43 @@ def _build_plotly_figure(
 def _artifact_cards(run_dir: Path, manifest: dict[str, Any], scene_rgb: np.ndarray, overlay_rgb: np.ndarray) -> list[tuple[str, str]]:
     cards: list[tuple[str, str]] = [("Scene RGB", _png_data_uri(scene_rgb)), ("Scene + projected grasps", _png_data_uri(overlay_rgb))]
     object_detection = manifest.get("object_detection") or {}
-    sam2_segmentation = manifest.get("sam2_segmentation") or {}
+    sam2_global = manifest.get("sam2_global") or {}
     optional_specs = [
         ("Object box overlay", (object_detection.get("paths") or {}).get("object_box_overlay")),
-        ("Object mask overlay", (sam2_segmentation.get("paths") or {}).get("object_mask_overlay")),
+        ("Global mask overlay (SAM2 whole object)", (sam2_global.get("paths") or {}).get("global_mask_overlay")),
     ]
     for title, candidate_path in optional_specs:
         image = _load_optional_image(run_dir, candidate_path)
         if image is not None:
             cards.append((title, _png_data_uri(image)))
+
+    sam2_local_entries = manifest.get("sam2_local") or []
+    clean_local_3d_entries = manifest.get("clean_local_3d") or []
+    clean_by_idx = {
+        entry.get("index"): entry
+        for entry in clean_local_3d_entries
+        if isinstance(entry, dict) and isinstance(entry.get("index"), int)
+    }
+    for entry in sam2_local_entries:
+        if not isinstance(entry, dict):
+            continue
+        idx = entry.get("index")
+        if not isinstance(idx, int):
+            continue
+        local_paths = entry.get("paths") or {}
+        local_overlay = local_paths.get("tight_grasp_mask_overlay")
+        local_image = _load_optional_image(run_dir, local_overlay)
+        if local_image is not None:
+            cards.append((f"Candidate #{idx:03d} - tight grasp mask", _png_data_uri(local_image)))
+        clean_entry = clean_by_idx.get(idx)
+        if isinstance(clean_entry, dict):
+            clean_paths = clean_entry.get("paths") or {}
+            pure_overlay = clean_paths.get("pure_target_pointcloud_overlay")
+            pure_image = _load_optional_image(run_dir, pure_overlay)
+            if pure_image is not None:
+                cards.append(
+                    (f"Candidate #{idx:03d} - pure target pointcloud (RGB overlay)", _png_data_uri(pure_image))
+                )
     return cards
 
 
@@ -729,11 +714,17 @@ def main() -> None:
     output_html = args.output_html.resolve() if args.output_html is not None else run_dir / "report.html"
 
     manifest = _load_manifest(run_dir)
-    grasps, schema_summary = _normalize_predictions(predictions_npz)
+    grasps, schema_summary = normalize_predictions(predictions_npz)
     selected_grasps = grasps[: args.top_k]
-    contact_input = _load_contact_input_npz(run_dir, manifest)
+    candidate_index = _infer_candidate_index(predictions_npz)
+    contact_input, selected_candidate = _load_contact_input_npz(run_dir, manifest, candidate_index)
     scene_rgb = _load_scene_rgb(run_dir, manifest, contact_input)
-    scene_points, scene_colors = _build_scene_point_cloud(contact_input, predictions_npz)
+    pure_target_points = _load_pure_target_pointcloud(run_dir, manifest, selected_candidate)
+    scene_points, scene_colors = _build_scene_point_cloud(
+        contact_input,
+        predictions_npz,
+        pure_target_points=pure_target_points,
+    )
     overlay_rgb = _make_overlay_image(
         scene_rgb=scene_rgb,
         K=np.asarray(contact_input["K"], dtype=np.float64),
@@ -764,6 +755,8 @@ def main() -> None:
     print("Prediction schema:")
     print(json.dumps(schema_summary, indent=2))
     print(f"Normalized grasps: {len(grasps)} total, visualizing top {len(selected_grasps)}")
+    if selected_candidate is not None:
+        print(f"Selected candidate index: {selected_candidate:03d}")
     print(f"Wrote HTML report to: {output_html}")
 
 

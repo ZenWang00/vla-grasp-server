@@ -15,6 +15,7 @@ class ParsedVlmResult:
     object_box: tuple[int, int, int, int] | None
     object_point: tuple[int, int] | None
     grasp_boxes: list[tuple[int, int, int, int]]
+    grasp_points: list[tuple[int, int] | None]
 
 
 def _normalize_box(ymin: int, xmin: int, ymax: int, xmax: int) -> tuple[int, int, int, int]:
@@ -106,6 +107,7 @@ def parse_vlm_result(raw_text: str, canvas_h: int, canvas_w: int, rgb_h: int) ->
         )
 
     parsed_boxes: list[tuple[int, int, int, int]] = []
+    parsed_points: list[tuple[int, int] | None] = []
     for idx, candidate in enumerate(candidates):
         ymin, xmin, ymax, xmax = _parse_candidate_box(candidate, candidate_name=f"candidate[{idx}]")
 
@@ -117,7 +119,21 @@ def parse_vlm_result(raw_text: str, canvas_h: int, canvas_w: int, rgb_h: int) ->
         )
         parsed_boxes.append(_normalize_box(final_ymin, final_xmin, final_ymax, final_xmax))
 
-    return ParsedVlmResult(object_box=object_box, object_point=object_point, grasp_boxes=parsed_boxes)
+        grasp_point_raw = candidate.get("grasp_point")
+        if grasp_point_raw is not None:
+            y_val, x_val = _parse_point(grasp_point_raw, field_name=f"candidate[{idx}].grasp_point")
+            parsed_points.append(
+                _scale_norm_xy_to_rgb(y_val, x_val, canvas_h=canvas_h, canvas_w=canvas_w, rgb_h=rgb_h)
+            )
+        else:
+            parsed_points.append(None)
+
+    return ParsedVlmResult(
+        object_box=object_box,
+        object_point=object_point,
+        grasp_boxes=parsed_boxes,
+        grasp_points=parsed_points,
+    )
 
 
 def parse_box_coords(raw_text: str, canvas_h: int, canvas_w: int, rgb_h: int) -> list[tuple[int, int, int, int]]:
