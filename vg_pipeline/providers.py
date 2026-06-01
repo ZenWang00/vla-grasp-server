@@ -11,79 +11,7 @@ from typing import Any
 
 from PIL import Image
 
-from .prompting import build_grounding_messages, build_grounding_prompt
-
-
-def run_qwen_vg(
-    model_path: str | Path,
-    images: Sequence[Image.Image],
-    task_spec: str,
-    num_candidates: int = 3,
-    max_new_tokens: int = 512,
-) -> str:
-    import torch
-    from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
-
-    raw = Path(model_path).expanduser()
-    resolved = raw.resolve()
-    if resolved.is_dir():
-        load_root = str(resolved)
-    elif raw.is_absolute():
-        raise FileNotFoundError(
-            f"Local Qwen model directory does not exist: {resolved}\n"
-            "Pass a real folder (e.g. --model models/qwen2.5-vl-7b from the repo root), "
-            "not a placeholder path. Or use a Hugging Face id such as Qwen/Qwen2.5-VL-7B-Instruct."
-        )
-    else:
-        load_root = str(raw)
-
-    processor = AutoProcessor.from_pretrained(
-        load_root,
-        trust_remote_code=True,
-    )
-    use_cuda = torch.cuda.is_available()
-    dtype = torch.float16 if use_cuda else torch.float32
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-        load_root,
-        dtype=dtype,
-        device_map="auto",
-        trust_remote_code=True,
-    )
-    model.eval()
-
-    image_list = list(images)
-    w, h = image_list[0].size
-    messages = build_grounding_messages(task_spec, w, h, image_list, num_candidates=num_candidates)
-    text_prompt = processor.apply_chat_template(
-        messages,
-        add_generation_prompt=True,
-        tokenize=False,
-    )
-    inputs = processor(
-        text=text_prompt,
-        images=image_list,
-        return_tensors="pt",
-    ).to(model.device)
-    if "pixel_values" in inputs:
-        inputs["pixel_values"] = inputs["pixel_values"].to(dtype=dtype)
-
-    with torch.inference_mode():
-        generated_ids = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-        )
-
-    trimmed = [
-        out_ids[len(in_ids) :]
-        for in_ids, out_ids in zip(inputs.input_ids, generated_ids, strict=True)
-    ]
-    out = processor.batch_decode(
-        trimmed,
-        skip_special_tokens=True,
-        clean_up_tokenization_spaces=False,
-    )[0]
-    return out
+from .prompting import build_grounding_prompt
 
 
 def _pil_to_data_url(image: Image.Image, *, mime_type: str = "image/png") -> str:
@@ -108,6 +36,7 @@ def run_openai_vg(
     num_candidates: int = 3,
     api_key: str | None = None,
     openai_image_mime_types: Sequence[str] | None = None,
+    prompt: str | None = None,
 ) -> str:
     key = api_key or os.environ.get("OPENAI_API_KEY")
     if not key:
@@ -117,7 +46,8 @@ def run_openai_vg(
         raise ValueError("run_openai_vg expects exactly one RGB image")
 
     w, h = images[0].size
-    prompt = build_grounding_prompt(task_spec, w, h, num_candidates=num_candidates)
+    if prompt is None:
+        prompt = build_grounding_prompt(task_spec, w, h, num_candidates=num_candidates)
 
     if openai_image_mime_types is None:
         mimes = ["image/png"]
@@ -187,6 +117,7 @@ def run_gemini_vg(
     api_key: str | None = None,
     code_execution: bool = False,
     gemini_image_mime_types: Sequence[str] | None = None,
+    prompt: str | None = None,
 ) -> str:
     key = api_key or os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not key:
@@ -196,7 +127,8 @@ def run_gemini_vg(
         raise ValueError("run_gemini_vg expects exactly one RGB image")
 
     w, h = images[0].size
-    prompt = build_grounding_prompt(task_spec, w, h, num_candidates=num_candidates)
+    if prompt is None:
+        prompt = build_grounding_prompt(task_spec, w, h, num_candidates=num_candidates)
 
     if gemini_image_mime_types is None:
         mimes = ["image/png"]
@@ -256,20 +188,12 @@ def run_vg_inference(
     num_candidates: int = 3,
     api_key: str | None = None,
     code_execution: bool = False,
-    max_new_tokens: int = 512,
     openai_image_mime_types: Sequence[str] | None = None,
     gemini_image_mime_types: Sequence[str] | None = None,
+    prompt: str | None = None,
 ) -> str:
     if len(images) != 1:
         raise ValueError("Visual grounding requires exactly one RGB image")
-    if provider == "qwen_local":
-        return run_qwen_vg(
-            model_path=model_path,
-            images=images,
-            task_spec=task_spec,
-            num_candidates=num_candidates,
-            max_new_tokens=max_new_tokens,
-        )
     if provider == "openai":
         return run_openai_vg(
             images=images,
@@ -278,6 +202,7 @@ def run_vg_inference(
             num_candidates=num_candidates,
             api_key=api_key,
             openai_image_mime_types=openai_image_mime_types,
+            prompt=prompt,
         )
     if provider == "gemini":
         return run_gemini_vg(
@@ -288,5 +213,6 @@ def run_vg_inference(
             api_key=api_key,
             code_execution=code_execution,
             gemini_image_mime_types=gemini_image_mime_types,
+            prompt=prompt,
         )
     raise ValueError(f"Unsupported provider: {provider}")

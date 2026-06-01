@@ -335,11 +335,16 @@ def _run_per_candidate_stage(
             # Contact-GraspNet's loader converts stored rgb from BGR to RGB, so export BGR here.
             rgb_bgr = rgb[:, :, ::-1].copy()
             depth_arr = np.asarray(depth)
-            # Zero depth outside the tight mask so CGN's full-scene point cloud cannot
-            # include background / whole-object context beyond the graspable region.
-            depth_for_cgn = np.where(tight_mask.astype(bool), depth_arr, 0.0).astype(
-                depth_arr.dtype, copy=False
-            )
+            # Use global_mask (full object) for depth context when available so CGN can
+            # reason about the complete object geometry (e.g. a hollow cup, not just a
+            # curved wall fragment). tight_segmap still directs CGN to the grasp region.
+            # Fallback to full unmasked depth when global_mask is unavailable.
+            if global_mask is not None:
+                depth_for_cgn = np.where(global_mask.astype(bool), depth_arr, 0.0).astype(
+                    depth_arr.dtype, copy=False
+                )
+            else:
+                depth_for_cgn = depth_arr.astype(depth_arr.dtype, copy=False)
             payload: dict[str, np.ndarray] = {
                 "depth": depth_for_cgn,
                 "K": np.asarray(K),
@@ -359,7 +364,7 @@ def _run_per_candidate_stage(
                     "path": export_rel,
                     "keys": keys,
                     "segmap_source": "tight_grasp_mask",
-                    "depth_masked_to_tight_region": True,
+                    "depth_masked_to_global_object": global_mask is not None,
                     "global_mask_included": global_included,
                 }
             )
@@ -376,7 +381,7 @@ def run_pipeline(
     task_spec: str,
     out_dir: str | Path,
     model_path: str | Path,
-    provider: str = "qwen_local",
+    provider: str = "gemini",
     api_key: str | None = None,
     code_execution: bool = False,
     schema_version: str = DEFAULT_SCHEMA_VERSION,

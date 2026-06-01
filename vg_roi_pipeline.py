@@ -59,16 +59,15 @@ def main() -> None:
     parser.add_argument(
         "--provider",
         type=str,
-        default="qwen_local",
-        choices=["qwen_local", "openai", "gemini"],
-        help="Inference backend: local qwen model or remote OpenAI/Gemini API",
+        default="gemini",
+        choices=["openai", "gemini"],
+        help="Inference backend: openai or gemini API",
     )
     parser.add_argument(
         "--model",
         type=str,
-        default="models/qwen2.5-vl-7b",
-        help="qwen_local: existing directory with weights (e.g. models/qwen2.5-vl-7b) or a HF model id "
-        "(e.g. Qwen/Qwen2.5-VL-7B-Instruct). openai/gemini: API model name.",
+        default="gemini-2.0-flash",
+        help="API model name, e.g. gemini-2.0-flash or gpt-4o.",
     )
     parser.add_argument(
         "--api-key",
