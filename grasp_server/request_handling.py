@@ -84,6 +84,51 @@ def _decode_K(k_json: str) -> np.ndarray:
 
 
 
+@dataclass(frozen=True)
+class MaterializedCapture:
+    capture_dir: Path
+    frame_id: str
+    rgb_shape: tuple[int, int, int]
+    depth_shape: tuple[int, int]
+
+
+def materialize_capture(
+    *,
+    rgb_bytes: bytes,
+    rgb_filename: str | None,
+    depth_bytes: bytes,
+    K_json: str,
+    frame_id: str,
+    capture_dir: Path,
+) -> MaterializedCapture:
+    """Validate inputs and write camera_data.npy + color_preview.jpg; no task_spec required."""
+    if not frame_id or not frame_id.strip():
+        raise ValueError("frame_id must be a non-empty string (e.g. 'camera_color_optical_frame')")
+
+    rgb = _decode_rgb(rgb_bytes, source_name=rgb_filename)
+    depth = _decode_depth(depth_bytes)
+    K = _decode_K(K_json)
+
+    if rgb.shape[:2] != depth.shape:
+        raise ValueError(
+            f"rgb shape {rgb.shape[:2]} does not match depth shape {depth.shape}; "
+            "both must share the same (H, W)."
+        )
+
+    capture_dir.mkdir(parents=True, exist_ok=True)
+    np.save(capture_dir / "camera_data.npy", {"depth": depth, "K": K}, allow_pickle=True)
+    Image.fromarray(rgb, mode="RGB").save(
+        capture_dir / "color_preview.jpg", format="JPEG", quality=95
+    )
+
+    return MaterializedCapture(
+        capture_dir=capture_dir,
+        frame_id=frame_id.strip(),
+        rgb_shape=(int(rgb.shape[0]), int(rgb.shape[1]), 3),
+        depth_shape=(int(depth.shape[0]), int(depth.shape[1])),
+    )
+
+
 def materialize_request(
     *,
     rgb_bytes: bytes,
