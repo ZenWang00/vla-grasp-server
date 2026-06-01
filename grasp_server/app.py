@@ -23,12 +23,20 @@ from typing import Any
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
-from vg_pipeline import new_run_id
+import numpy as np
+from PIL import Image
 
+from vg_pipeline import new_run_id
+from vg_pipeline.align import parse_align_result
+from vg_pipeline.io import load_observation_npy, resolve_capture_dir
+from vg_pipeline.prompting import build_align_prompt
+from vg_pipeline.providers import run_vg_inference
+
+from .align_grasp import build_align_grasp
 from .cgn_client import CgnWorker, WorkerError
 from .config import ServerConfig
 from .grasp_selection import predicted_npz_paths, select_top_k_grasps
-from .grasp_viz import save_grasp_viz
+from .grasp_viz import save_grasp_viz, save_grasp_viz_3d
 from .pipeline_runner import run_vg_pipeline
 from .request_handling import materialize_capture, materialize_request
 from .ui import UI_HTML
@@ -57,6 +65,7 @@ async def lifespan(app: FastAPI):
     app.state.upload_lock = asyncio.Lock()
     app.state.last_grasp_result = None  # last /run_grasp payload, for /trigger_publish
     app.state.last_grasp_viz_path = None  # Path to the latest grasp_viz.jpg
+    app.state.last_grasp_viz_3d_path = None  # Path to the latest grasp_viz_3d.html
     app.state.pending_publish = None    # set by /trigger_publish, cleared by /poll_publish
     app.state.publish_lock = asyncio.Lock()
     app.state.latest_frame_bytes = None  # latest JPEG pushed by the ROS2 node
@@ -180,6 +189,14 @@ async def grasp_viz_image() -> Response:
     return Response(content=viz_path.read_bytes(), media_type="image/jpeg")
 
 
+@app.get("/grasp_viz_3d", response_class=HTMLResponse)
+async def grasp_viz_3d() -> HTMLResponse:
+    viz_path: Path | None = app.state.last_grasp_viz_3d_path
+    if viz_path is None or not viz_path.is_file():
+        raise HTTPException(status_code=404, detail="no 3-D grasp visualization available yet")
+    return HTMLResponse(viz_path.read_text(encoding="utf-8"))
+
+
 @app.post("/run_grasp")
 async def run_grasp(
     task_spec: str = Form(..., description='Natural-language task, e.g. "grasp the cup".'),
@@ -275,6 +292,10 @@ async def run_grasp(
     if viz_path:
         app.state.last_grasp_viz_path = viz_path
 
+    viz_3d_path = save_grasp_viz_3d(pending.capture_dir, pipeline_result.run_dir, grasps_json)
+    if viz_3d_path:
+        app.state.last_grasp_viz_3d_path = viz_3d_path
+
     result_payload = {
         "run_id": run_id,
         "run_dir": str(pipeline_result.run_dir),
@@ -282,6 +303,111 @@ async def run_grasp(
         "elapsed_ms": elapsed_ms,
         "num_candidates": num_candidates,
         "top_k": top_k,
+        "grasps": grasps_json,
+        "grasp_viz": str(viz_path) if viz_path else None,
+    }
+    app.state.last_grasp_result = result_payload
+    return JSONResponse(result_payload)
+
+
+def _run_align_pipeline(
+    *,
+    capture_dir: Path,
+    task_spec: str,
+    provider: str,
+    model: str,
+) -> list[dict[str, Any]]:
+    """VLM align-point inference -> depth back-projection -> single 6-DoF grasp dict.
+
+    Runs in a worker thread (blocking HTTP + numpy). No SAM2 / Contact-GraspNet.
+    """
+    npy_path, scene_path, _ = resolve_capture_dir(capture_dir)
+    obs = load_observation_npy(npy_path)
+    depth = np.asarray(obs["depth"])
+    K = np.asarray(obs["K"])
+    rgb = np.asarray(Image.open(scene_path).convert("RGB"), dtype=np.uint8)
+    h, w = int(depth.shape[0]), int(depth.shape[1])
+
+    prompt = build_align_prompt(task_spec, w, h)
+    raw_model_text = run_vg_inference(
+        provider=provider,
+        images=[Image.fromarray(rgb)],
+        task_spec=task_spec,
+        model_path=model,
+        openai_image_mime_types=["image/png"],
+        gemini_image_mime_types=["image/png"],
+        prompt=prompt,
+    )
+    parsed = parse_align_result(raw_model_text, canvas_h=h, canvas_w=w, rgb_h=h)
+    return build_align_grasp(
+        depth,
+        K,
+        point_yx=parsed.point_yx,
+        angle_deg=parsed.angle_deg,
+        width_m=parsed.width_m,
+    )
+
+
+@app.post("/run_align")
+async def run_align(
+    task_spec: str = Form(..., description='Natural-language target, e.g. "the rail".'),
+    provider: str | None = Form(None, description="Optional VLM provider override."),
+    model: str | None = Form(None, description="Optional VLM model override."),
+) -> JSONResponse:
+    """Lightweight flow: VLA returns a 2D alignment point + gripper angle; the server
+    recovers the 3D camera-frame 6-DoF pose from the captured depth map. Same response
+    schema as ``/run_grasp`` so the downstream ROS2 client is unaffected. Does not use
+    the Contact-GraspNet worker."""
+    config, _, request_lock = _get_state(app)
+
+    pending: PendingCapture | None = app.state.pending_capture
+    if pending is None:
+        raise HTTPException(
+            status_code=400,
+            detail="no capture uploaded yet — press the right button on the 3D mouse first",
+        )
+
+    task_spec = task_spec.strip()
+    if not task_spec:
+        raise HTTPException(status_code=400, detail="task_spec must be a non-empty string")
+
+    run_id = new_run_id()
+    effective_provider = provider or config.provider
+    effective_model = model or config.model
+
+    async with request_lock:
+        t_start = time.perf_counter()
+        try:
+            grasps_json = await asyncio.to_thread(
+                _run_align_pipeline,
+                capture_dir=pending.capture_dir,
+                task_spec=task_spec,
+                provider=effective_provider,
+                model=effective_model,
+            )
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=500, detail=f"capture file error: {exc}") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"align flow rejected the inputs: {exc}") from exc
+        except Exception as exc:
+            logger.exception("align flow failed")
+            raise HTTPException(status_code=500, detail=f"align flow failed: {exc}") from exc
+
+        elapsed_ms = int((time.perf_counter() - t_start) * 1000)
+
+    app.state.last_request_ms = elapsed_ms
+
+    viz_path = save_grasp_viz(pending.capture_dir, pending.capture_dir, grasps_json)
+    if viz_path:
+        app.state.last_grasp_viz_path = viz_path
+
+    result_payload = {
+        "run_id": run_id,
+        "run_dir": str(pending.capture_dir),
+        "frame_id": pending.frame_id,
+        "elapsed_ms": elapsed_ms,
+        "num_candidates": 1,
+        "top_k": 1,
         "grasps": grasps_json,
         "grasp_viz": str(viz_path) if viz_path else None,
     }
@@ -404,6 +530,7 @@ async def grasp(
     app.state.last_run_dir = pipeline_result.run_dir
 
     viz_path = save_grasp_viz(parsed.capture_dir, pipeline_result.run_dir, grasps_json)
+    save_grasp_viz_3d(parsed.capture_dir, pipeline_result.run_dir, grasps_json)
 
     return JSONResponse({
         "run_id": run_id,

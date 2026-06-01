@@ -48,6 +48,13 @@ UI_HTML = """<!DOCTYPE html>
   button#run-btn:hover { background: #1f66c7; }
   button#run-btn:disabled { background: #444; cursor: not-allowed; }
 
+  button#align-btn {
+    padding: 10px; background: #b5803f; border: none; border-radius: 6px;
+    color: #fff; font-size: 0.95rem; cursor: pointer; margin-top: 8px;
+  }
+  button#align-btn:hover { background: #9a6a30; }
+  button#align-btn:disabled { background: #444; cursor: not-allowed; }
+
   button#send-btn {
     padding: 10px; background: #2e7d32; border: none; border-radius: 6px;
     color: #fff; font-size: 0.95rem; cursor: pointer; margin-top: 8px; display: none;
@@ -55,6 +62,12 @@ UI_HTML = """<!DOCTYPE html>
   button#send-btn:hover { background: #1b5e20; }
   button#send-btn:disabled { background: #444; cursor: not-allowed; }
   #send-status { font-size: 0.82rem; margin-top: 4px; }
+
+  button#view3d-btn {
+    padding: 10px; background: #6a3fb5; border: none; border-radius: 6px;
+    color: #fff; font-size: 0.95rem; cursor: pointer; margin-top: 4px; display: none;
+  }
+  button#view3d-btn:hover { background: #5430a0; }
 
   #result-panel { margin-top: 20px; display: none; }
   #result-panel h2 { font-size: 1rem; margin-bottom: 12px; color: #ccc; }
@@ -120,9 +133,11 @@ UI_HTML = """<!DOCTYPE html>
       </div>
     </details>
     <button id="run-btn" onclick="runGrasp()">Run Grasp</button>
+    <button id="align-btn" onclick="runAlign()">Run Align (2D point)</button>
     <div id="status-msg"></div>
     <button id="send-btn" onclick="sendToRobot()">&#9654; Send to Robot</button>
     <div id="send-status"></div>
+    <button id="view3d-btn" onclick="window.open('/grasp_viz_3d','_blank')">&#9706; View 3D Point Cloud</button>
 
     <div id="result-panel">
       <h2>Results</h2>
@@ -166,6 +181,23 @@ function pollCaptureStatus() {
 }
 setInterval(pollCaptureStatus, 500);
 
+// ── Capture step (shared by Run Grasp and Run Align) ──────────────────────
+async function captureFrame(statusEl) {
+  statusEl.innerHTML = '<span class="spinner"></span>Capturing...';
+  const capResp = await fetch('/request_capture', { method: 'POST' });
+  if (!capResp.ok) throw new Error('request_capture failed');
+
+  // Poll /capture_status until uploaded_at changes (max 5 s).
+  const prevTs = lastCaptureTs;
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    await new Promise(r => setTimeout(r, 200));
+    const s = await fetch('/capture_status').then(r => r.json()).catch(() => ({}));
+    if (s.uploaded_at && s.uploaded_at !== prevTs) return true;
+  }
+  return false;
+}
+
 // ── Run grasp ─────────────────────────────────────────────────────────────
 async function runGrasp() {
   const taskSpec = document.getElementById('task_spec').value.trim();
@@ -181,20 +213,7 @@ async function runGrasp() {
 
   // Step 1: request capture and wait for ROS2 node to upload it.
   try {
-    statusEl.innerHTML = '<span class="spinner"></span>Capturing...';
-    const capResp = await fetch('/request_capture', { method: 'POST' });
-    if (!capResp.ok) throw new Error('request_capture failed');
-
-    // Poll /capture_status until uploaded_at changes (max 5 s).
-    const prevTs = lastCaptureTs;
-    const deadline = Date.now() + 5000;
-    let captured = false;
-    while (Date.now() < deadline) {
-      await new Promise(r => setTimeout(r, 200));
-      const s = await fetch('/capture_status').then(r => r.json()).catch(() => ({}));
-      if (s.uploaded_at && s.uploaded_at !== prevTs) { captured = true; break; }
-    }
-    if (!captured) {
+    if (!await captureFrame(statusEl)) {
       statusEl.innerHTML = '<span class="badge-err">Capture timed out — is the ROS2 node running?</span>';
       btn.disabled = false;
       return;
@@ -235,6 +254,60 @@ async function runGrasp() {
   }
 }
 
+// ── Run align (2D point + depth -> 6-DoF) ─────────────────────────────────
+async function runAlign() {
+  const taskSpec = document.getElementById('task_spec').value.trim();
+  if (!taskSpec) {
+    document.getElementById('status-msg').innerHTML =
+      '<span class="badge-err">task_spec is required.</span>';
+    return;
+  }
+
+  const btn = document.getElementById('align-btn');
+  const statusEl = document.getElementById('status-msg');
+  btn.disabled = true;
+
+  // Step 1: request capture (same as Run Grasp).
+  try {
+    if (!await captureFrame(statusEl)) {
+      statusEl.innerHTML = '<span class="badge-err">Capture timed out — is the ROS2 node running?</span>';
+      btn.disabled = false;
+      return;
+    }
+  } catch (e) {
+    statusEl.innerHTML = '<span class="badge-err">Capture error:</span> ' + escapeHtml(String(e));
+    btn.disabled = false;
+    return;
+  }
+
+  // Step 2: run the lightweight align flow.
+  statusEl.innerHTML = '<span class="spinner"></span>Running align...';
+  const fd = new FormData();
+  fd.append('task_spec', taskSpec);
+  const provider = document.getElementById('provider').value.trim();
+  const model = document.getElementById('model').value.trim();
+  if (provider) fd.append('provider', provider);
+  if (model) fd.append('model', model);
+
+  try {
+    const resp = await fetch('/run_align', { method: 'POST', body: fd });
+    const data = await resp.json();
+    if (!resp.ok) {
+      const msg = data.detail || JSON.stringify(data);
+      statusEl.innerHTML = '<span class="badge-err">Error ' + resp.status + ':</span> ' +
+        escapeHtml(typeof msg === 'string' ? msg : JSON.stringify(msg));
+    } else {
+      renderResult(data);
+      statusEl.innerHTML = '<span class="badge-ok">Done (align)</span> — ' +
+        data.elapsed_ms + ' ms &nbsp;|&nbsp; run_id: ' + escapeHtml(data.run_id);
+    }
+  } catch (e) {
+    statusEl.innerHTML = '<span class="badge-err">Network error:</span> ' + escapeHtml(String(e));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // ── Send to Robot ─────────────────────────────────────────────────────────
 async function sendToRobot() {
   const btn = document.getElementById('send-btn');
@@ -263,6 +336,7 @@ function renderResult(data) {
   panel.style.display = 'block';
   document.getElementById('send-btn').style.display = 'block';
   document.getElementById('send-status').innerHTML = '';
+  document.getElementById('view3d-btn').style.display = 'block';
   cards.innerHTML = '';
 
   // Update the left panel image to show the grasp visualization.
