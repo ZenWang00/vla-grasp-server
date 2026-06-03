@@ -61,7 +61,10 @@ def build_align_grasp(
     qx, qy, qz, qw = _rotation_to_quaternion_xyzw(pose[:3, :3])
 
     grasp = {
+        # TODO (tech debt): score is not comparable across pipelines for top-K selection
+        # (A=approach dot-product, B=CGN confidence, C=1.0). To be unified later.
         "score": 1.0,
+        "model_confidence": None,  # Option C has no model confidence; VLA-align only
         "pose_4x4": pose.tolist(),
         "position_xyz": pose[:3, 3].astype(float).tolist(),
         "quaternion_xyzw": [qx, qy, qz, qw],

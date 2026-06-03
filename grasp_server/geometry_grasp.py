@@ -232,7 +232,10 @@ def generate_geometry_grasps(
     for idx, (score, width_m, pose) in enumerate(kept):
         qx, qy, qz, qw = _rotation_to_quaternion_xyzw(pose[:3, :3])
         grasps.append({
+            # TODO (tech debt): score is not comparable across pipelines for top-K selection
+            # (A=approach dot-product, B=CGN confidence, C=1.0). To be unified later.
             "score": score,
+            "model_confidence": None,  # Option A has no model confidence; geometry-only
             "pose_4x4": pose.tolist(),
             "position_xyz": pose[:3, 3].tolist(),
             "quaternion_xyzw": [qx, qy, qz, qw],
