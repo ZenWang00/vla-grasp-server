@@ -51,6 +51,43 @@ def parse_align_result(
     return AlignResult(point_yx=point_yx, angle_deg=angle_deg, width_m=width_m)
 
 
+def parse_align_results_multi(
+    raw_text: str, *, canvas_h: int, canvas_w: int, rgb_h: int
+) -> list[AlignResult]:
+    """Parse VLM JSON with a ``candidates`` array into a list of :class:`AlignResult`.
+
+    Raises ``ValueError`` if no candidates are found in the response.
+    """
+    data = _load_vlm_json(raw_text)
+    candidates = data.get("candidates")
+    if not isinstance(candidates, list) or len(candidates) == 0:
+        raise ValueError("VLM returned no candidates in align multi response:\n" + str(data))
+
+    results: list[AlignResult] = []
+    for item in candidates:
+        point_raw = item.get("align_point")
+        if not isinstance(point_raw, list) or len(point_raw) != 2:
+            raise ValueError("'align_point' must be a list [y, x] in each candidate:\n" + str(item))
+        y_val, x_val = point_raw
+        point_yx = _scale_norm_xy_to_rgb(
+            y_val, x_val, canvas_h=canvas_h, canvas_w=canvas_w, rgb_h=rgb_h
+        )
+
+        angle_raw = item.get("gripper_angle_deg")
+        if not isinstance(angle_raw, (int, float)):
+            raise ValueError("'gripper_angle_deg' must be a number in each candidate:\n" + str(item))
+        angle_deg = float(angle_raw)
+
+        width_m: float | None = None
+        width_raw = item.get("width_mm")
+        if isinstance(width_raw, (int, float)) and float(width_raw) > 0.0:
+            width_m = float(width_raw) / 1000.0
+
+        results.append(AlignResult(point_yx=point_yx, angle_deg=angle_deg, width_m=width_m))
+
+    return results
+
+
 def sample_depth_median(
     depth: np.ndarray, v: int, u: int, *, window: int = 5
 ) -> float:
