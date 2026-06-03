@@ -88,7 +88,13 @@ def _serialize_grasp(grasp: NormalizedGrasp) -> dict[str, Any]:
         _candidate_index_from_npz(grasp.source_npz) if grasp.source_npz is not None else None
     )
     return {
+        # TODO (tech debt): score is not comparable across pipelines for top-K selection
+        # (A=approach dot-product, B=CGN confidence, C=1.0). To be unified later.
         "score": float(grasp.score),
+        # model_confidence: CGN output, Option B only. Same source as score (score field
+        # does not yet represent geometric quality — tech debt). Not used in any
+        # computation currently; do not conflate with score if score's source changes.
+        "model_confidence": float(grasp.score),
         "pose_4x4": pose.tolist(),
         "position_xyz": pose[:3, 3].astype(float).tolist(),
         "quaternion_xyzw": [qx, qy, qz, qw],
