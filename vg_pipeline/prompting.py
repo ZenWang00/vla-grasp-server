@@ -67,9 +67,47 @@ ALIGN_POINT_PROMPT_TEMPLATE = (
 )
 
 
+ALIGN_POINT_MULTI_PROMPT_TEMPLATE = (
+    "Role:\n"
+    "You are an expert in Embodied AI and robot vision. Your task is to analyze one RGB image and "
+    "provide {num_candidates} candidate alignment/cut-in point(s) for a robotic parallel-jaw gripper, "
+    "ranked from most to least preferred.\n\n"
+    "Image description:\n"
+    "- You are given a single RGB image with size {w} (width) x {h} (height) pixels.\n"
+    "- The image contains only color appearance information; no depth map is provided.\n"
+    "- The robot already has a separate depth sensor; you must only locate the 2D points and the "
+    "in-image gripper orientations. The 3D distance is recovered later from depth.\n\n"
+    "Reasoning task:\n"
+    "1. Target identification: find the object/rail corresponding to \"{task_spec}\" in the image.\n"
+    "2. Candidate alignment points: output {num_candidates} `align_point` [y, x] location(s), each at a "
+    "distinct, stable, unoccluded contact band on the main body. "
+    "Avoid handles, spouts, edges, tips, weak joints and high-curvature regions.\n"
+    "3. Gripper angle: for each candidate, output `gripper_angle_deg`, the in-image rotation (degrees) "
+    "of the gripper's closing direction. 0 means fingers close along the image +x (horizontal) axis; "
+    "positive rotates toward image +y. Choose the angle so the jaws close across the narrow dimension.\n"
+    "4. Optional width: if you can estimate it, output `width_mm` per candidate; otherwise omit it.\n\n"
+    "Output format requirements:\n"
+    "- Use normalized coordinates for `align_point`, with values ranging from 0 to 1000, mapping "
+    "directly to this image's width (x) and height (y).\n"
+    "- `gripper_angle_deg` is an absolute angle in degrees, not normalized.\n"
+    "- Candidates must cover distinct grasp locations to maximize robustness.\n"
+    "- The output format must be JSON:\n"
+    '{{"target": "{task_spec}", "candidates": [{{"rank": 1, "align_point": [y, x], '
+    '"gripper_angle_deg": <number>, "width_mm": <number, optional>, '
+    '"reasoning": "Briefly explain"}}]}}\n'
+)
+
+
 def build_align_prompt(task_spec: str, w: int, h: int) -> str:
     """Prompt for the lightweight 2D alignment-point flow (single point + gripper angle)."""
     return ALIGN_POINT_PROMPT_TEMPLATE.format(task_spec=task_spec.strip(), w=w, h=h)
+
+
+def build_align_prompt_multi(task_spec: str, w: int, h: int, num_candidates: int) -> str:
+    """Prompt for the multi-candidate alignment-point flow."""
+    return ALIGN_POINT_MULTI_PROMPT_TEMPLATE.format(
+        task_spec=task_spec.strip(), w=w, h=h, num_candidates=num_candidates
+    )
 
 
 def build_grasp_task_spec(task_spec: str) -> str:

@@ -20,21 +20,24 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 import numpy as np
 from PIL import Image
 
 from vg_pipeline import new_run_id
-from vg_pipeline.align import parse_align_result
+from vg_pipeline.align import parse_align_result, parse_align_results_multi
 from vg_pipeline.io import load_observation_npy, resolve_capture_dir
-from vg_pipeline.prompting import build_align_prompt
+from vg_pipeline.prompting import build_align_prompt, build_align_prompt_multi
 from vg_pipeline.providers import run_vg_inference
 
 from .align_grasp import build_align_grasp
 from .cgn_client import CgnWorker, WorkerError
 from .config import ServerConfig
+from .geometry_grasp import generate_geometry_grasps
+from .grasp_filter import filter_grasps
+from .grasp_scorer import select_best
 from .grasp_selection import predicted_npz_paths, select_top_k_grasps
 from .grasp_viz import save_grasp_viz, save_grasp_viz_3d
 from .pipeline_runner import run_vg_pipeline
@@ -66,8 +69,10 @@ async def lifespan(app: FastAPI):
     app.state.last_grasp_result = None  # last /run_grasp payload, for /trigger_publish
     app.state.last_grasp_viz_path = None  # Path to the latest grasp_viz.jpg
     app.state.last_grasp_viz_3d_path = None  # Path to the latest grasp_viz_3d.html
-    app.state.pending_publish = None    # set by /trigger_publish, cleared by /poll_publish
+    app.state.pending_publish = None    # set by /trigger_publish or /select_and_execute, cleared by /poll_publish
     app.state.publish_lock = asyncio.Lock()
+    app.state.ik_results = {}           # trace_id -> {status: "pending"|"complete", grasps, run_id, run_dir, …}
+    app.state.ik_results_lock = asyncio.Lock()
     app.state.latest_frame_bytes = None  # latest JPEG pushed by the ROS2 node
     app.state.frame_lock = asyncio.Lock()
     app.state.capture_requested = False  # set by /request_capture, cleared by /poll_capture_request
@@ -316,10 +321,12 @@ def _run_align_pipeline(
     task_spec: str,
     provider: str,
     model: str,
+    num_candidates: int = 1,
 ) -> list[dict[str, Any]]:
-    """VLM align-point inference -> depth back-projection -> single 6-DoF grasp dict.
+    """VLM align-point inference -> depth back-projection -> list of 6-DoF grasp dicts.
 
     Runs in a worker thread (blocking HTTP + numpy). No SAM2 / Contact-GraspNet.
+    When num_candidates == 1, uses the single-point prompt for backward compatibility.
     """
     npy_path, scene_path, _ = resolve_capture_dir(capture_dir)
     obs = load_observation_npy(npy_path)
@@ -328,29 +335,47 @@ def _run_align_pipeline(
     rgb = np.asarray(Image.open(scene_path).convert("RGB"), dtype=np.uint8)
     h, w = int(depth.shape[0]), int(depth.shape[1])
 
-    prompt = build_align_prompt(task_spec, w, h)
-    raw_model_text = run_vg_inference(
-        provider=provider,
-        images=[Image.fromarray(rgb)],
-        task_spec=task_spec,
-        model_path=model,
-        openai_image_mime_types=["image/png"],
-        gemini_image_mime_types=["image/png"],
-        prompt=prompt,
-    )
-    parsed = parse_align_result(raw_model_text, canvas_h=h, canvas_w=w, rgb_h=h)
-    return build_align_grasp(
-        depth,
-        K,
-        point_yx=parsed.point_yx,
-        angle_deg=parsed.angle_deg,
-        width_m=parsed.width_m,
-    )
+    if num_candidates == 1:
+        prompt = build_align_prompt(task_spec, w, h)
+        raw_model_text = run_vg_inference(
+            provider=provider,
+            images=[Image.fromarray(rgb)],
+            task_spec=task_spec,
+            model_path=model,
+            openai_image_mime_types=["image/png"],
+            gemini_image_mime_types=["image/png"],
+            prompt=prompt,
+        )
+        parsed_list = [parse_align_result(raw_model_text, canvas_h=h, canvas_w=w, rgb_h=h)]
+    else:
+        prompt = build_align_prompt_multi(task_spec, w, h, num_candidates)
+        raw_model_text = run_vg_inference(
+            provider=provider,
+            images=[Image.fromarray(rgb)],
+            task_spec=task_spec,
+            model_path=model,
+            openai_image_mime_types=["image/png"],
+            gemini_image_mime_types=["image/png"],
+            prompt=prompt,
+        )
+        parsed_list = parse_align_results_multi(raw_model_text, canvas_h=h, canvas_w=w, rgb_h=h)
+
+    grasps: list[dict[str, Any]] = []
+    for parsed in parsed_list:
+        grasps.extend(build_align_grasp(
+            depth,
+            K,
+            point_yx=parsed.point_yx,
+            angle_deg=parsed.angle_deg,
+            width_m=parsed.width_m,
+        ))
+    return grasps
 
 
 @app.post("/run_align")
 async def run_align(
     task_spec: str = Form(..., description='Natural-language target, e.g. "the rail".'),
+    num_candidates: int = Form(1, description="Number of alignment candidates to request from the VLM."),
     provider: str | None = Form(None, description="Optional VLM provider override."),
     model: str | None = Form(None, description="Optional VLM model override."),
 ) -> JSONResponse:
@@ -370,6 +395,8 @@ async def run_align(
     task_spec = task_spec.strip()
     if not task_spec:
         raise HTTPException(status_code=400, detail="task_spec must be a non-empty string")
+    if num_candidates < 1:
+        raise HTTPException(status_code=400, detail="num_candidates must be >= 1")
 
     run_id = new_run_id()
     effective_provider = provider or config.provider
@@ -384,6 +411,7 @@ async def run_align(
                 task_spec=task_spec,
                 provider=effective_provider,
                 model=effective_model,
+                num_candidates=num_candidates,
             )
         except FileNotFoundError as exc:
             raise HTTPException(status_code=500, detail=f"capture file error: {exc}") from exc
@@ -406,8 +434,8 @@ async def run_align(
         "run_dir": str(pending.capture_dir),
         "frame_id": pending.frame_id,
         "elapsed_ms": elapsed_ms,
-        "num_candidates": 1,
-        "top_k": 1,
+        "num_candidates": num_candidates,
+        "top_k": len(grasps_json),
         "grasps": grasps_json,
         "grasp_viz": str(viz_path) if viz_path else None,
     }
@@ -592,12 +620,147 @@ async def capture_status() -> JSONResponse:
 
 @app.post("/trigger_publish")
 async def trigger_publish() -> JSONResponse:
-    """Mark the last /run_grasp result as pending for the ROS2 node to pick up."""
+    """Mark the last /run_grasp result as pending for the ROS2 node to pick up (direct, no IK)."""
     if app.state.last_grasp_result is None:
         raise HTTPException(status_code=404, detail="no grasp result available — run a grasp first")
+    result = app.state.last_grasp_result
     async with app.state.publish_lock:
-        app.state.pending_publish = app.state.last_grasp_result
-    return JSONResponse({"status": "ok", "run_id": app.state.last_grasp_result["run_id"]})
+        app.state.pending_publish = {
+            **result,
+            "mode": "execute",
+            "trace_id": result.get("trace_id", result["run_id"]),
+        }
+    return JSONResponse({"status": "ok", "run_id": result["run_id"]})
+
+
+@app.post("/trigger_ik_check")
+async def trigger_ik_check() -> JSONResponse:
+    """Pre-filter grasps server-side, then queue for IK checking by the ROS2 client."""
+    if app.state.last_grasp_result is None:
+        raise HTTPException(status_code=404, detail="no grasp result available — run a grasp first")
+    pending: PendingCapture | None = app.state.pending_capture
+    if pending is None:
+        raise HTTPException(status_code=400, detail="no capture available — upload before IK check")
+
+    # Load depth + K — same pattern as _run_geometry_pipeline
+    npy_path, _, _ = resolve_capture_dir(pending.capture_dir)
+    obs = load_observation_npy(npy_path)
+    depth = np.asarray(obs["depth"])
+    K = np.asarray(obs["K"])
+
+    raw_grasps: list[dict] = list(app.state.last_grasp_result.get("grasps", []))
+
+    try:
+        filter_report = await asyncio.to_thread(filter_grasps, raw_grasps, depth, K)
+    except NotImplementedError:
+        filter_report = None  # stubs not yet implemented — pass through all grasps
+
+    if filter_report is not None and filter_report.num_passed == 0:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"all {filter_report.total} grasps rejected by pre-IK filter "
+                f"(width={len(filter_report.rejected_width)}, "
+                f"clearance={len(filter_report.rejected_clearance)}, "
+                f"collision={len(filter_report.rejected_collision)})"
+            ),
+        )
+
+    filtered_grasps = filter_report.passed if filter_report is not None else raw_grasps
+    trace_id = new_run_id()
+
+    # Store metadata + filtered grasps in ik_results with status="pending".
+    # submit_ik_result will update grasps and flip status to "complete".
+    entry = {
+        **app.state.last_grasp_result,
+        "grasps": filtered_grasps,
+        "trace_id": trace_id,
+        "status": "pending",
+    }
+    async with app.state.ik_results_lock:
+        app.state.ik_results[trace_id] = entry
+    async with app.state.publish_lock:
+        app.state.pending_publish = {**entry, "mode": "ik_check"}
+
+    return JSONResponse({
+        "status": "ok",
+        "run_id": entry["run_id"],
+        "trace_id": trace_id,
+        "num_before_filter": len(raw_grasps),
+        "num_after_filter": len(filtered_grasps),
+    })
+
+
+@app.post("/submit_ik_result")
+async def submit_ik_result(payload: dict = Body(...)) -> JSONResponse:
+    """ROS2 returns IK-passing grasps. Updates ik_results to 'complete'; does NOT execute."""
+    trace_id = payload.get("trace_id", "")
+    run_id = payload.get("run_id", "")
+    grasps = payload.get("grasps", [])
+
+    async with app.state.ik_results_lock:
+        entry = app.state.ik_results.get(trace_id)
+        if entry is None or entry.get("status") != "pending":
+            raise HTTPException(
+                status_code=409,
+                detail=f"no pending IK check for trace_id={trace_id!r}",
+            )
+        app.state.ik_results[trace_id] = {
+            **entry,
+            "run_id": run_id,
+            "grasps": grasps,
+            "status": "complete",
+        }
+
+    return JSONResponse({"status": "ok", "trace_id": trace_id, "num_passing": len(grasps)})
+
+
+@app.get("/ik_result_status")
+async def ik_result_status(trace_id: str = Query(...)) -> JSONResponse:
+    """Web UI polls this to know when the ROS2 client has submitted IK results.
+
+    Response:
+      count=None  → IK not yet back
+      count=N>0   → N grasps passed IK; proceed to select_and_execute
+      count=0     → all grasps failed IK; UI should prompt re-capture
+    """
+    async with app.state.ik_results_lock:
+        entry = app.state.ik_results.get(trace_id)
+    complete = entry is not None and entry.get("status") == "complete"
+    count = len(entry["grasps"]) if complete else None
+    return JSONResponse({"trace_id": trace_id, "ready": complete, "count": count})
+
+
+@app.post("/select_and_execute")
+async def select_and_execute(payload: dict = Body(...)) -> JSONResponse:
+    """Score IK-passing grasps, select the single best, queue for execution."""
+    trace_id = payload.get("trace_id", "")
+    async with app.state.ik_results_lock:
+        entry = app.state.ik_results.pop(trace_id, None)
+    if entry is None or entry.get("status") != "complete":
+        raise HTTPException(status_code=404, detail=f"no completed IK result for trace_id={trace_id!r}")
+
+    ik_grasps: list[dict] = entry.get("grasps", [])
+    if not ik_grasps:
+        raise HTTPException(
+            status_code=422,
+            detail="IK rejected all candidates — re-capture from a different angle",
+        )
+
+    try:
+        best_grasp = select_best(ik_grasps)
+    except NotImplementedError:
+        best_grasp = ik_grasps[0]  # fallback while scorer stubs are unfilled
+
+    async with app.state.publish_lock:
+        app.state.pending_publish = {**entry, "grasps": [best_grasp], "mode": "execute"}
+
+    return JSONResponse({
+        "status": "ok",
+        "trace_id": trace_id,
+        "num_ik_passing": len(ik_grasps),
+        "num_selected": 1,
+    })
 
 
 @app.get("/poll_publish")
@@ -609,6 +772,104 @@ async def poll_publish() -> JSONResponse:
             app.state.pending_publish = None
             return JSONResponse(result)
     raise HTTPException(status_code=404, detail="no pending publish")
+
+
+def _run_geometry_pipeline(
+    *,
+    capture_dir: Path,
+    approach_dir: list[float] | None,
+    top_k: int,
+) -> list[dict[str, Any]]:
+    """Pure-geometry grasp generation: point cloud PCA, no VLM / SAM2 / CGN."""
+    npy_path, _, _ = resolve_capture_dir(capture_dir)
+    obs = load_observation_npy(npy_path)
+    depth = np.asarray(obs["depth"])
+    K = np.asarray(obs["K"])
+    return generate_geometry_grasps(depth, K, approach_dir_cam=approach_dir, top_k=top_k)
+
+
+@app.post("/run_geometry")
+async def run_geometry(
+    top_k: int = Form(3, description="Number of top-scoring geometry grasps to return."),
+    approach_dir: str | None = Form(
+        None,
+        description='Optional preferred approach direction as JSON "[x, y, z]" in camera frame. '
+                    'Defaults to [0, 0, 1] (camera +Z).',
+    ),
+) -> JSONResponse:
+    """Option-A geometry-only grasp: PCA on the captured depth map, no AI required.
+
+    The response schema is identical to ``/run_grasp`` and ``/run_align`` so the
+    ROS2 client and ``/trigger_publish`` work without modification.
+    """
+    _, _, request_lock = _get_state(app)
+
+    pending: PendingCapture | None = app.state.pending_capture
+    if pending is None:
+        raise HTTPException(
+            status_code=400,
+            detail="no capture uploaded yet — press the right button on the 3D mouse first",
+        )
+    if top_k < 1:
+        raise HTTPException(status_code=400, detail="top_k must be >= 1")
+
+    parsed_approach: list[float] | None = None
+    if approach_dir is not None:
+        try:
+            import json as _json
+            parsed_approach = _json.loads(approach_dir)
+            if not (isinstance(parsed_approach, list) and len(parsed_approach) == 3):
+                raise ValueError
+            parsed_approach = [float(v) for v in parsed_approach]
+        except (ValueError, TypeError):
+            raise HTTPException(
+                status_code=400,
+                detail="approach_dir must be a JSON array of 3 floats, e.g. \"[0,0,1]\"",
+            )
+
+    run_id = new_run_id()
+
+    async with request_lock:
+        t_start = time.perf_counter()
+        try:
+            grasps_json = await asyncio.to_thread(
+                _run_geometry_pipeline,
+                capture_dir=pending.capture_dir,
+                approach_dir=parsed_approach,
+                top_k=top_k,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"geometry pipeline error: {exc}") from exc
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=500, detail=f"capture file error: {exc}") from exc
+        except Exception as exc:
+            logger.exception("geometry pipeline failed")
+            raise HTTPException(status_code=500, detail=f"geometry pipeline failed: {exc}") from exc
+
+        elapsed_ms = int((time.perf_counter() - t_start) * 1000)
+
+    app.state.last_request_ms = elapsed_ms
+
+    viz_path = save_grasp_viz(pending.capture_dir, pending.capture_dir, grasps_json)
+    if viz_path:
+        app.state.last_grasp_viz_path = viz_path
+
+    viz_3d_path = save_grasp_viz_3d(pending.capture_dir, pending.capture_dir, grasps_json)
+    if viz_3d_path:
+        app.state.last_grasp_viz_3d_path = viz_3d_path
+
+    result_payload = {
+        "run_id": run_id,
+        "run_dir": str(pending.capture_dir),
+        "frame_id": pending.frame_id,
+        "elapsed_ms": elapsed_ms,
+        "num_candidates": len(grasps_json),
+        "top_k": top_k,
+        "grasps": grasps_json,
+        "grasp_viz": str(viz_path) if viz_path else None,
+    }
+    app.state.last_grasp_result = result_payload
+    return JSONResponse(result_payload)
 
 
 def _ensure_output_base_exists() -> None:
