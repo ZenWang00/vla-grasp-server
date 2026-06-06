@@ -107,6 +107,17 @@ UI_HTML = """<!DOCTYPE html>
   details { margin-top: 8px; }
   summary { cursor: pointer; color: #888; font-size: 0.8rem; }
   pre { background: #111; padding: 8px; border-radius: 4px; overflow-x: auto; font-size: 0.75rem; color: #aaa; }
+  .grasp-card.ik-best {
+    border: 2px solid #ffd700;
+    background: #252520;
+  }
+  .badge-best { color: #ffd700; font-weight: bold; }
+  .score-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px;
+    font-size: 0.78rem; color: #aaa; margin-top: 6px;
+  }
+  .score-item { white-space: nowrap; }
+  .score-label { color: #666; }
 </style>
 </head>
 <body>
@@ -479,9 +490,9 @@ async function triggerIkCheck() {
     btn.disabled = false; return;
   }
 
-  // Step 2: poll until ROS2 client submits IK results (max 10 s)
+  // Step 2: poll until ROS2 client submits IK results (max 30 s)
   statusEl.innerHTML = '<span class="spinner"></span>Waiting for IK result (trace: ' + escapeHtml(traceId) + ')...';
-  const deadline = Date.now() + 10000;
+  const deadline = Date.now() + 30000;
   let ready = false;
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 500));
@@ -495,7 +506,7 @@ async function triggerIkCheck() {
     btn.disabled = false; return;
   }
 
-  // Step 3: run server-side selection and queue for execution
+  // Step 3: run server-side scoring, selection, and queue for execution
   try {
     const r = await fetch('/select_and_execute', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -505,13 +516,72 @@ async function triggerIkCheck() {
     if (!r.ok) {
       statusEl.innerHTML = '<span class="badge-err">Select error:</span> ' + escapeHtml(String(d.detail));
     } else {
-      statusEl.innerHTML = '<span class="badge-ok">IK done, executing</span> — trace_id: ' + escapeHtml(traceId);
+      renderIkResult(d);
+      const best = d.scored_grasps[d.best_index];
+      statusEl.innerHTML =
+        '<span class="badge-ok">IK done — executing</span>' +
+        ' &nbsp;best #' + (d.best_index + 1) +
+        ' &nbsp;composite&nbsp;' + best.composite_score.toFixed(3);
     }
   } catch (e) {
     statusEl.innerHTML = '<span class="badge-err">Network error on select</span>';
   } finally {
     btn.disabled = false;
   }
+}
+
+// ── Render IK scoring result ──────────────────────────────────────────────
+function renderIkResult(data) {
+  const panel = document.getElementById('result-panel');
+  const cards = document.getElementById('grasp-cards');
+  panel.style.display = 'block';
+
+  const header = document.createElement('div');
+  header.style.cssText = 'font-size:0.78rem;color:#888;margin-bottom:8px;';
+  header.textContent = 'IK-passing: ' + data.scored_grasps.length + '  ·  scored & ranked';
+  cards.innerHTML = '';
+  cards.appendChild(header);
+
+  // Show in ranked order (best first).
+  data.ranked_indices.forEach((origIdx, rankPos) => {
+    const g = data.scored_grasps[origIdx];
+    const isBest = origIdx === data.best_index;
+
+    const pos = (g.position_xyz || []).map(v => v.toFixed(4)).join(', ');
+    const q   = (g.quaternion_xyzw || []).map(v => v.toFixed(4)).join(', ');
+    const width = g.width_m != null ? (g.width_m * 1000).toFixed(1) + ' mm' : 'n/a';
+    const comp  = g.composite_score != null ? g.composite_score.toFixed(4) : 'n/a';
+    const clr   = g.clearance_score  != null ? g.clearance_score.toFixed(3)  : '—';
+    const col   = g.collision_score  != null ? g.collision_score.toFixed(3)  : '—';
+    const cq    = g.contact_quality_score != null ? g.contact_quality_score.toFixed(3) : '—';
+    const wm    = g.width_m != null ? (1 - g.width_m / 0.08).toFixed(3) : '—';
+
+    const div = document.createElement('div');
+    div.className = 'grasp-card' + (isBest ? ' ik-best' : '');
+    div.innerHTML =
+      '<div class="rank">' +
+        '#' + (rankPos + 1) +
+        (isBest ? ' &nbsp;<span class="badge-best">★ SELECTED</span>' : '') +
+      '</div>' +
+      '<b>Composite score:</b> ' + comp + '<br>' +
+      '<div class="score-grid">' +
+        '<div class="score-item"><span class="score-label">Clearance</span> ' + clr + '</div>' +
+        '<div class="score-item"><span class="score-label">Collision</span> ' + col + '</div>' +
+        '<div class="score-item"><span class="score-label">Contact</span> ' + cq + '</div>' +
+        '<div class="score-item"><span class="score-label">Width margin</span> ' + wm + '</div>' +
+      '</div>' +
+      '<br><b>Width:</b> ' + width + '<br>' +
+      '<b>Position (xyz):</b> [' + pos + ']<br>' +
+      '<b>Quaternion (xyzw):</b> [' + q + ']<br>' +
+      '<details><summary>Raw JSON</summary><pre>' +
+        escapeHtml(JSON.stringify(g, null, 2)) + '</pre></details>';
+    cards.appendChild(div);
+  });
+
+  // Update the left panel to show the gold best-grasp overlay.
+  const img = document.getElementById('capture-img');
+  img.src = '/grasp_viz_best_image?t=' + Date.now();
+  document.getElementById('capture-status').textContent = '★ Best grasp selected — queued for execution';
 }
 
 function escapeHtml(s) {

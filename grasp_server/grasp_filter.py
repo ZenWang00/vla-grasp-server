@@ -27,6 +27,11 @@ import numpy as np
 
 from vg_pipeline.grasp_results import FINGER_LENGTH_METERS, GRIPPER_DEPTH_METERS
 
+# TODO: confirm from URDF collision mesh; 16 mm total (8 mm per finger side) is estimated
+_FINGER_THICKNESS_M = 0.016
+# how far behind the finger root to check for palm/body collision
+_PALM_DEPTH_M = 0.05
+
 
 @dataclass(frozen=True)
 class GraspFilterConfig:
@@ -209,25 +214,37 @@ def _score_collision(
     pts_ap = pts_rel @ approach_dir  # along approach axis
 
     half_width = width_m / 2.0
-    finger_half_thick = 0.008  # 8 mm half-thickness of each finger (approximate)
-
-    # Left finger box: closing > +half_width, |lateral| < FINGER_LENGTH/2, |approach| < GRIPPER_DEPTH
-    # Right finger box: closing < -half_width, same lateral/approach bounds
-    ap_min, ap_max = -GRIPPER_DEPTH_METERS, 0.0
     la_half = FINGER_LENGTH_METERS / 2.0
 
     max_penetration = 0.0
+
+    # Finger solid (both fingers): overflow of scene points past the inner face of each finger.
+    # Grasp region (|pts_cl| < half_width) is implicitly excluded by the lower bound.
+    # pen = sign*pts_cl - half_width = how far into the finger body the surface point sits.
+    # Normal contact (object touching inner face): pen ≈ 0–cfg.max_penetration_m → passes.
+    # Obstacle deep in finger body: pen >> max_penetration_m → rejected.
     for sign in (1.0, -1.0):
-        in_box = (
+        in_finger = (
             (np.abs(pts_la) < la_half) &
-            (pts_ap > ap_min) & (pts_ap < ap_max) &
-            (sign * pts_cl > half_width) &
-            (sign * pts_cl < half_width + 2 * finger_half_thick)
+            (pts_ap > -GRIPPER_DEPTH_METERS) & (pts_ap < 0.0) &
+            (sign * pts_cl >= half_width) &
+            (sign * pts_cl < half_width + _FINGER_THICKNESS_M)
         )
-        if np.any(in_box):
-            # Penetration depth = how far inside the finger
-            pen = float(np.max(sign * pts_cl[in_box] - half_width))
+        if np.any(in_finger):
+            pen = float(np.max(sign * pts_cl[in_finger] - half_width))
             max_penetration = max(max_penetration, pen)
+
+    # Palm solid: gripper body behind the finger root (ap < -GRIPPER_DEPTH).
+    # Checks a window of _PALM_DEPTH_M to avoid false positives from distant background.
+    palm_min = -GRIPPER_DEPTH_METERS - _PALM_DEPTH_M
+    in_palm = (
+        (pts_ap < -GRIPPER_DEPTH_METERS) & (pts_ap > palm_min) &
+        (np.abs(pts_cl) < half_width + _FINGER_THICKNESS_M) &
+        (np.abs(pts_la) < la_half)
+    )
+    if np.any(in_palm):
+        pen_palm = float(np.max(-GRIPPER_DEPTH_METERS - pts_ap[in_palm]))
+        max_penetration = max(max_penetration, pen_palm)
 
     passes = max_penetration <= cfg.max_penetration_m
     score = 1.0 - float(np.clip(max_penetration / cfg.max_penetration_m, 0.0, 1.0))

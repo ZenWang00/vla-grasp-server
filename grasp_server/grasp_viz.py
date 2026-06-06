@@ -379,3 +379,104 @@ def save_grasp_viz_3d(
         return None
 
     return out_path
+
+
+_GOLD = (255, 215, 0)
+
+
+def save_grasp_viz_best(
+    capture_dir: Path,
+    run_dir: Path,
+    best_grasp: dict[str, Any],
+    composite_score: float,
+    *,
+    out_filename: str = "grasp_viz_best.jpg",
+) -> Path | None:
+    """Draw a gold overlay arrow for the selected best grasp; save to *run_dir/out_filename*.
+
+    Opens the original capture image (not the multi-candidate viz) so the gold
+    marker stands out without the ranked-color arrows underneath it.
+    Returns the output path, or None if the image or grasp data is unavailable.
+    """
+    preview_path = capture_dir / "color_preview.jpg"
+    npy_path = capture_dir / "camera_data.npy"
+
+    if not preview_path.is_file():
+        logger.warning("grasp_viz_best: color_preview.jpg not found at %s", preview_path)
+        return None
+    if not npy_path.is_file():
+        logger.warning("grasp_viz_best: camera_data.npy not found at %s", npy_path)
+        return None
+
+    xyz = best_grasp.get("position_xyz")
+    if xyz is None or len(xyz) != 3:
+        logger.warning("grasp_viz_best: best_grasp missing position_xyz")
+        return None
+
+    try:
+        cam_data = np.load(npy_path, allow_pickle=True).item()
+        K = np.asarray(cam_data["K"], dtype=np.float64)
+        if K.shape != (3, 3):
+            raise ValueError(f"K has wrong shape {K.shape}")
+    except Exception as exc:
+        logger.warning("grasp_viz_best: failed to load K: %s", exc)
+        return None
+
+    try:
+        img = Image.open(preview_path).convert("RGB")
+    except Exception as exc:
+        logger.warning("grasp_viz_best: failed to open preview image: %s", exc)
+        return None
+
+    draw = ImageDraw.Draw(img)
+    W, H = img.size
+    line_width = max(3, min(W, H) // 120)
+    dot_radius = max(8, min(W, H) // 70)
+
+    try:
+        font = ImageFont.truetype(
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            size=max(16, dot_radius + 2),
+        )
+    except Exception:
+        font = ImageFont.load_default()
+
+    start_px = _project(xyz, K)
+    if start_px is None:
+        logger.warning("grasp_viz_best: grasp projects behind camera")
+        return None
+
+    approach = best_grasp.get("approach_dir_xyz")
+    if approach is not None and len(approach) == 3:
+        end_xyz = [
+            float(xyz[0]) + _APPROACH_METRES * float(approach[0]),
+            float(xyz[1]) + _APPROACH_METRES * float(approach[1]),
+            float(xyz[2]) + _APPROACH_METRES * float(approach[2]),
+        ]
+        end_px = _project(end_xyz, K)
+        if end_px is not None:
+            _draw_arrow(draw, start_px, end_px, _GOLD, line_width + 1)
+
+    u, v = start_px
+    r = dot_radius
+    draw.ellipse(
+        [u - r, v - r, u + r, v + r],
+        fill=_GOLD,
+        outline=(180, 140, 0),
+        width=max(2, r // 4),
+    )
+
+    label = f"★ BEST  {composite_score:.3f}"
+    tx, ty = u + r + 5, v - r
+    draw.text((tx + 1, ty + 1), label, fill=(0, 0, 0), font=font)
+    draw.text((tx, ty), label, fill=_GOLD, font=font)
+
+    out_path = run_dir / out_filename
+    try:
+        img.save(out_path, format="JPEG", quality=92)
+        logger.info("grasp_viz_best: saved to %s", out_path)
+    except Exception as exc:
+        logger.warning("grasp_viz_best: failed to save %s: %s", out_path, exc)
+        return None
+
+    return out_path
