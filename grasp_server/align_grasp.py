@@ -25,6 +25,8 @@ from vg_pipeline.align import deproject_pixel, sample_depth_median
 
 from .grasp_selection import _rotation_to_quaternion_xyzw
 
+_DEFAULT_WIDTH_M = 0.05  # 50 mm — used when LLM does not estimate gripper width
+
 
 def _pose_from_point_and_angle(position_xyz: np.ndarray, angle_deg: float) -> np.ndarray:
     """4x4 camera-frame pose: approach=+Z, closing direction rotated by ``angle_deg`` in-plane."""
@@ -68,7 +70,7 @@ def build_align_grasp(
         "pose_4x4": pose.tolist(),
         "position_xyz": pose[:3, 3].astype(float).tolist(),
         "quaternion_xyzw": [qx, qy, qz, qw],
-        "width_m": None if width_m is None else float(width_m),
+        "width_m": float(width_m) if width_m is not None else _DEFAULT_WIDTH_M,
         "approach_dir_xyz": pose[:3, 2].astype(float).tolist(),
         "source": {
             "candidate_index": 0,
