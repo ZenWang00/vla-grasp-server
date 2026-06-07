@@ -48,12 +48,7 @@ sequenceDiagram
     Server->>Server: save_grasp_viz() + save_grasp_viz_3d()
     Server-->>WebUI: {run_id, grasps[], grasp_viz, elapsed_ms}
 
-    Note over WebUI,Server: Phase 2b — Option A: 纯几何 (无 AI)
-    WebUI->>Server: POST /run_geometry<br/>(top_k, approach_dir?)
-    Server->>Server: generate_geometry_grasps()<br/>depth→点云→PCA→候选姿态→按 approach 评分→去重→top_k
-    Server-->>WebUI: {run_id, grasps[]}
-
-    Note over WebUI,Server: Phase 2c — Option C: VLA Alignment (轻量)
+    Note over WebUI,Server: Phase 2b — Option B: VLA Alignment (轻量)
     WebUI->>Server: POST /run_align<br/>(task_spec, num_candidates)
     Server->>VLM: build_align_prompt() + run_vg_inference()<br/>→ 输出 2D 对齐点 + 夹角
     VLM-->>Server: point_yx, angle_deg, width_m
@@ -119,19 +114,10 @@ flowchart TD
         W4 --> W5[(Server: pending_capture\ncamera_data.npy)]
         W5 --> W6{选择生成方式}
 
-        W6 -->|Option A 纯几何| OA[POST /run_geometry]
-        W6 -->|Option B VLM+SAM2+CGN| OB[POST /run_grasp]
-        W6 -->|Option C VLA对齐| OC[POST /run_align]
+        W6 -->|Option A VLM+SAM2+CGN| OB[POST /run_grasp]
+        W6 -->|Option B VLA对齐| OC[POST /run_align]
 
-        subgraph OPT_A["Option A — 几何 (无AI)"]
-            OA --> A1[depth → 反投影点云]
-            A1 --> A2[PCA → 3 主轴 × 2 方向]
-            A2 --> A3[n_rot × n_pos 候选姿态]
-            A3 --> A4[按 approach 方向余弦评分]
-            A4 --> A5[去重 + 排序 → top_k GraspDict]
-        end
-
-        subgraph OPT_B["Option B — VLM + SAM2 + CGN"]
+        subgraph OPT_B["Option A — VLM + SAM2 + CGN"]
             OB --> B1[build_align_prompt_multi\n→ VLM 推理]
             B1 --> B2[parse_align_results_multi\n→ num_candidates 个 bounding box]
             B2 --> B3[SAM2 分割 → mask + 点云]
@@ -140,14 +126,14 @@ flowchart TD
             B5 --> B6[normalize_predictions_multi\n→ 跨 candidate 合并排序\n→ top_k GraspDict]
         end
 
-        subgraph OPT_C["Option C — VLA 对齐 (轻量)"]
+        subgraph OPT_C["Option B — VLA 对齐 (轻量)"]
             OC --> C1[build_align_prompt\n→ VLM 推理]
             C1 --> C2[parse: point_yx, angle_deg, width_m]
             C2 --> C3[depth 反投影 5×5 中值\n→ 3D position]
             C3 --> C4[build_align_grasp\napproach 固定 camera +Z\nscore 固定 1.0]
         end
 
-        A5 & B6 & C4 --> GEN_OUT([grasps: GraspDict[]\npose_4x4, quaternion_xyzw\nwidth_m, approach_dir_xyz\nscore, source])
+        B6 & C4 --> GEN_OUT([grasps: GraspDict[]\npose_4x4, quaternion_xyzw\nwidth_m, approach_dir_xyz\nscore, source])
         GEN_OUT --> VIZ[save_grasp_viz\nsave_grasp_viz_3d]
     end
 
@@ -200,7 +186,6 @@ flowchart TD
     I9 --> S1
     S4 --> E1
 
-    style OPT_A fill:#e8f4e8,stroke:#4caf50
     style OPT_B fill:#e3f2fd,stroke:#2196f3
     style OPT_C fill:#fff3e0,stroke:#ff9800
     style FILTER fill:#fce4ec,stroke:#e91e63

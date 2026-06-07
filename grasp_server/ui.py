@@ -175,15 +175,7 @@ UI_HTML = """<!DOCTYPE html>
     </div>
     <button id="align-btn" onclick="runAlign()">Run Align (2D point)</button>
 
-    <div class="section-label">Run Geometry (PCA, no AI)</div>
-    <div class="row">
-      <div class="field">
-        <label for="geo_top_k">Candidates</label>
-        <input type="number" id="geo_top_k" value="3" min="1" max="20">
-      </div>
-    </div>
-    <button id="geo-btn" onclick="runGeometry()">Run Geometry (PCA)</button>
-    <div id="status-msg"></div>
+<div id="status-msg"></div>
     <button id="send-btn" onclick="sendToRobot()">&#9654; Send to Robot</button>
     <div id="send-status"></div>
     <button id="ik-btn" onclick="triggerIkCheck()">&#10003; IK Check + Execute</button>
@@ -351,49 +343,6 @@ async function runAlign() {
     } else {
       renderResult(data);
       statusEl.innerHTML = '<span class="badge-ok">Done (align)</span> — ' +
-        data.elapsed_ms + ' ms &nbsp;|&nbsp; run_id: ' + escapeHtml(data.run_id);
-    }
-  } catch (e) {
-    statusEl.innerHTML = '<span class="badge-err">Network error:</span> ' + escapeHtml(String(e));
-  } finally {
-    btn.disabled = false;
-  }
-}
-
-// ── Run geometry (PCA-based, no AI) ──────────────────────────────────────
-async function runGeometry() {
-  const btn = document.getElementById('geo-btn');
-  const statusEl = document.getElementById('status-msg');
-  btn.disabled = true;
-
-  // Step 1: request capture (same as other run modes).
-  try {
-    if (!await captureFrame(statusEl)) {
-      statusEl.innerHTML = '<span class="badge-err">Capture timed out — is the ROS2 node running?</span>';
-      btn.disabled = false;
-      return;
-    }
-  } catch (e) {
-    statusEl.innerHTML = '<span class="badge-err">Capture error:</span> ' + escapeHtml(String(e));
-    btn.disabled = false;
-    return;
-  }
-
-  // Step 2: run the geometry pipeline.
-  statusEl.innerHTML = '<span class="spinner"></span>Running geometry PCA...';
-  const fd = new FormData();
-  fd.append('top_k', document.getElementById('geo_top_k').value);
-
-  try {
-    const resp = await fetch('/run_geometry', { method: 'POST', body: fd });
-    const data = await resp.json();
-    if (!resp.ok) {
-      const msg = data.detail || JSON.stringify(data);
-      statusEl.innerHTML = '<span class="badge-err">Error ' + resp.status + ':</span> ' +
-        escapeHtml(typeof msg === 'string' ? msg : JSON.stringify(msg));
-    } else {
-      renderResult(data);
-      statusEl.innerHTML = '<span class="badge-ok">Done (geometry)</span> — ' +
         data.elapsed_ms + ' ms &nbsp;|&nbsp; run_id: ' + escapeHtml(data.run_id);
     }
   } catch (e) {
