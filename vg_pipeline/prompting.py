@@ -62,8 +62,7 @@ ALIGN_POINT_MULTI_PROMPT_TEMPLATE = (
     "4. Gripper angle: for each candidate, output `gripper_angle_deg`, the in-image rotation (degrees) "
     "of the gripper's closing direction. 0 means fingers close along the image +x (horizontal) axis; "
     "positive rotates toward image +y. Choose the angle so the jaws close across the narrow dimension.\n"
-    "5. Optional width: if you can estimate it, output `width_mm` per candidate; otherwise omit it.\n"
-    "6. Self-check: before finalising, verify that no two candidates are within 80 normalized units "
+    "5. Self-check: before finalising, verify that no two candidates are within 80 normalized units "
     "of each other in `align_point`. If any pair is too close, move one to a more distant zone.\n\n"
     "Output format requirements (server-enforced — violations cause a hard parse error):\n"
     "- `align_point` must be [y, x] — exactly 2 numeric elements, no more, no less.\n"
@@ -74,14 +73,12 @@ ALIGN_POINT_MULTI_PROMPT_TEMPLATE = (
     "The server samples depth in a 5×5 pixel window around the point; if no valid depth exists there "
     "the candidate is rejected. Prefer the thickest, most opaque part of the object.\n"
     "- `gripper_angle_deg` must be a plain number (int or float). Do not wrap it in quotes or a list.\n"
-    "- `width_mm` is optional. If included it must be a positive number strictly greater than 0. "
-    "If you cannot estimate it, omit the field entirely — do not set it to 0 or null.\n"
     "- `candidates` must be a non-empty JSON array even when only one candidate is requested.\n"
     "- Each candidate's `reasoning` must name its body zone and explain how it differs from the "
     "other candidates (location, angle, or contact geometry).\n"
     "- The output format must be JSON:\n"
     '{{"target": "{task_spec}", "candidates": [{{"rank": 1, "align_point": [y, x], '
-    '"gripper_angle_deg": <number>, "width_mm": <number, optional>, '
+    '"gripper_angle_deg": <number>, '
     '"reasoning": "Zone: <zone name>. <Why this point and how it differs from others.>"}}]}}\n'
 )
 
