@@ -65,11 +65,11 @@ async def lifespan(app: FastAPI):
     app.state.last_run_dir = None
     app.state.pending_capture = None  # PendingCapture | None
     app.state.upload_lock = asyncio.Lock()
-    app.state.last_grasp_result = None  # last /run_grasp payload, for /trigger_publish
+    app.state.last_grasp_result = None  # last /run_grasp payload, for /trigger_ik_check
     app.state.last_grasp_viz_path = None       # Path to the latest grasp_viz.jpg
     app.state.last_grasp_viz_3d_path = None    # Path to the latest grasp_viz_3d.html
     app.state.last_grasp_viz_best_path = None  # Path to the latest grasp_viz_best.jpg (post-IK selection)
-    app.state.pending_publish = None    # set by /trigger_publish or /select_and_execute, cleared by /poll_publish
+    app.state.pending_publish = None    # set by /trigger_ik_check or /select_and_execute, cleared by /poll_publish
     app.state.publish_lock = asyncio.Lock()
     app.state.ik_results = {}           # trace_id -> {status: "pending"|"complete", grasps, run_id, run_dir, …}
     app.state.ik_results_lock = asyncio.Lock()
@@ -613,20 +613,6 @@ async def capture_status() -> JSONResponse:
     pending: PendingCapture | None = app.state.pending_capture
     return JSONResponse({"uploaded_at": pending.uploaded_at if pending else None})
 
-
-@app.post("/trigger_publish")
-async def trigger_publish() -> JSONResponse:
-    """Mark the last /run_grasp result as pending for the ROS2 node to pick up (direct, no IK)."""
-    if app.state.last_grasp_result is None:
-        raise HTTPException(status_code=404, detail="no grasp result available — run a grasp first")
-    result = app.state.last_grasp_result
-    async with app.state.publish_lock:
-        app.state.pending_publish = {
-            **result,
-            "mode": "execute",
-            "trace_id": result.get("trace_id", result["run_id"]),
-        }
-    return JSONResponse({"status": "ok", "run_id": result["run_id"]})
 
 
 @app.post("/trigger_ik_check")

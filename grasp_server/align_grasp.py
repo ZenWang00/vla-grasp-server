@@ -1,7 +1,7 @@
 """Assemble a single 6-DoF grasp dict from a VLA 2D alignment point + gripper angle.
 
 The output matches :func:`grasp_selection._serialize_grasp` field-for-field so the
-ROS2 client (and the ``/trigger_publish`` -> ``/poll_publish`` path) consumes it
+ROS2 client (and the ``/select_and_execute`` -> ``/poll_publish`` path) consumes it
 identically to a Contact-GraspNet grasp.
 
 Pose convention (camera frame, same as Contact-GraspNet):

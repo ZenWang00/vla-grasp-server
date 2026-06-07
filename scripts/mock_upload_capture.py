@@ -136,8 +136,8 @@ def run_daemon(
             if r.status_code == 200 and r.json().get("requested"):
                 print(f"[{time.strftime('%H:%M:%S')}] capture requested → uploading ...")
                 do_upload(server_url, rgb_bytes, depth_bytes, K_json, frame_id, timeout_s, push)
-        except requests.RequestException as exc:
-            print(f"  poll error: {exc}")
+        except Exception as exc:
+            print(f"  error: {type(exc).__name__}: {exc}")
         time.sleep(poll_interval_s)
 
 

@@ -66,13 +66,7 @@ UI_HTML = """<!DOCTYPE html>
   button#geo-btn:hover { background: #236147; }
   button#geo-btn:disabled { background: #444; cursor: not-allowed; }
 
-  button#send-btn {
-    padding: 10px; background: #2e7d32; border: none; border-radius: 6px;
-    color: #fff; font-size: 0.95rem; cursor: pointer; margin-top: 8px; display: none;
-  }
-  button#send-btn:hover { background: #1b5e20; }
-  button#send-btn:disabled { background: #444; cursor: not-allowed; }
-  #send-status { font-size: 0.82rem; margin-top: 4px; }
+
 
   button#ik-btn {
     padding: 10px; background: #b08020; border: none; border-radius: 6px;
@@ -176,8 +170,6 @@ UI_HTML = """<!DOCTYPE html>
     <button id="align-btn" onclick="runAlign()">Run Align (2D point)</button>
 
 <div id="status-msg"></div>
-    <button id="send-btn" onclick="sendToRobot()">&#9654; Send to Robot</button>
-    <div id="send-status"></div>
     <button id="ik-btn" onclick="triggerIkCheck()">&#10003; IK Check + Execute</button>
     <div id="ik-status"></div>
     <button id="view3d-btn" onclick="window.open('/grasp_viz_3d','_blank')">&#9706; View 3D Point Cloud</button>
@@ -226,12 +218,12 @@ setInterval(pollCaptureStatus, 500);
 
 // ── Capture step (shared by Run Grasp and Run Align) ──────────────────────
 async function captureFrame(statusEl) {
+  const prevTs = lastCaptureTs;  // snapshot before the request so a fast daemon can't race us
   statusEl.innerHTML = '<span class="spinner"></span>Capturing...';
   const capResp = await fetch('/request_capture', { method: 'POST' });
   if (!capResp.ok) throw new Error('request_capture failed');
 
   // Poll /capture_status until uploaded_at changes (max 5 s).
-  const prevTs = lastCaptureTs;
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
     await new Promise(r => setTimeout(r, 200));
@@ -352,34 +344,11 @@ async function runAlign() {
   }
 }
 
-// ── Send to Robot ─────────────────────────────────────────────────────────
-async function sendToRobot() {
-  const btn = document.getElementById('send-btn');
-  const statusEl = document.getElementById('send-status');
-  btn.disabled = true;
-  statusEl.innerHTML = '<span class="spinner"></span>Sending...';
-  try {
-    const resp = await fetch('/trigger_publish', { method: 'POST' });
-    const data = await resp.json();
-    if (!resp.ok) {
-      const msg = data.detail || JSON.stringify(data);
-      statusEl.innerHTML = '<span class="badge-err">Error:</span> ' + escapeHtml(String(msg));
-    } else {
-      statusEl.innerHTML = '<span class="badge-ok">Sent</span> — run_id: ' + escapeHtml(data.run_id);
-    }
-  } catch (e) {
-    statusEl.innerHTML = '<span class="badge-err">Network error:</span> ' + escapeHtml(String(e));
-  } finally {
-    btn.disabled = false;
-  }
-}
 
 function renderResult(data) {
   const panel = document.getElementById('result-panel');
   const cards = document.getElementById('grasp-cards');
   panel.style.display = 'block';
-  document.getElementById('send-btn').style.display = 'block';
-  document.getElementById('send-status').innerHTML = '';
   document.getElementById('ik-btn').style.display = 'block';
   document.getElementById('ik-status').innerHTML = '';
   document.getElementById('view3d-btn').style.display = 'block';
