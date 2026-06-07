@@ -37,40 +37,11 @@ PLAN_B_PROMPT_TEMPLATE = (
 )
 
 
-ALIGN_POINT_PROMPT_TEMPLATE = (
-    "Role:\n"
-    "You are an expert in Embodied AI and robot vision. Your task is to analyze one RGB image and "
-    "provide a single precise alignment/cut-in point for a robotic parallel-jaw gripper.\n\n"
-    "Image description:\n"
-    "- You are given a single RGB image with size {w} (width) x {h} (height) pixels.\n"
-    "- The image contains only color appearance information; no depth map is provided.\n"
-    "- The robot already has a separate depth sensor; you must only locate the 2D point and the "
-    "in-image gripper orientation. The 3D distance is recovered later from depth.\n\n"
-    "Reasoning task:\n"
-    "1. Target identification: find the object/rail corresponding to \"{task_spec}\" in the image.\n"
-    "2. Alignment point: output a single `align_point` [y, x] at the best place for the gripper to "
-    "cut in / make contact — a stable, unoccluded, approximately parallel contact band on the main body. "
-    "Avoid handles, spouts, edges, tips, weak joints and high-curvature regions.\n"
-    "3. Gripper angle: output `gripper_angle_deg`, the in-image rotation (degrees) of the gripper's "
-    "closing direction (the line connecting the two finger tips). 0 means the fingers close along the "
-    "image +x (horizontal) axis; positive rotates toward image +y. Choose the angle so the jaws close "
-    "across the narrow dimension of the target at the alignment point.\n"
-    "4. Optional width: if you can estimate it, output `width_mm`, the gripper opening in millimetres "
-    "needed to clear the target at that point; otherwise omit it.\n\n"
-    "Output format requirements:\n"
-    "- Use normalized coordinates for `align_point`, with values ranging from 0 to 1000, mapping "
-    "directly to this image's width (x) and height (y).\n"
-    "- `gripper_angle_deg` is an absolute angle in degrees, not normalized.\n"
-    "- The output format must be JSON:\n"
-    '{{"target": "{task_spec}", "align_point": [y, x], "gripper_angle_deg": <number>, '
-    '"width_mm": <number, optional>, "reasoning": "Briefly explain the alignment logic"}}\n'
-)
-
 
 ALIGN_POINT_MULTI_PROMPT_TEMPLATE = (
     "Role:\n"
     "You are an expert in Embodied AI and robot vision. Your task is to analyze one RGB image and "
-    "provide {num_candidates} candidate alignment/cut-in point(s) for a robotic parallel-jaw gripper, "
+    "propose {num_candidates} DIVERSE candidate alignment/cut-in points for a robotic parallel-jaw gripper, "
     "ranked from most to least preferred.\n\n"
     "Image description:\n"
     "- You are given a single RGB image with size {w} (width) x {h} (height) pixels.\n"
@@ -79,28 +50,40 @@ ALIGN_POINT_MULTI_PROMPT_TEMPLATE = (
     "in-image gripper orientations. The 3D distance is recovered later from depth.\n\n"
     "Reasoning task:\n"
     "1. Target identification: find the object/rail corresponding to \"{task_spec}\" in the image.\n"
-    "2. Candidate alignment points: output {num_candidates} `align_point` [y, x] location(s), each at a "
-    "distinct, stable, unoccluded contact band on the main body. "
+    "2. Diversity planning (do this BEFORE choosing coordinates): mentally divide the target object "
+    "into distinct spatial zones (e.g. upper / middle / lower section, left side / right side, "
+    "narrow end / wide end). Assign each candidate to a DIFFERENT zone so that no two candidates "
+    "share the same body region. Also vary the gripper approach: at least one candidate should have "
+    "a substantially different `gripper_angle_deg` (≥30° difference) from the others when the "
+    "object geometry allows it.\n"
+    "3. Candidate alignment points: for each zone chosen in step 2, output one `align_point` [y, x] "
+    "at a stable, unoccluded contact band. "
     "Avoid handles, spouts, edges, tips, weak joints and high-curvature regions.\n"
-    "3. Gripper angle: for each candidate, output `gripper_angle_deg`, the in-image rotation (degrees) "
+    "4. Gripper angle: for each candidate, output `gripper_angle_deg`, the in-image rotation (degrees) "
     "of the gripper's closing direction. 0 means fingers close along the image +x (horizontal) axis; "
     "positive rotates toward image +y. Choose the angle so the jaws close across the narrow dimension.\n"
-    "4. Optional width: if you can estimate it, output `width_mm` per candidate; otherwise omit it.\n\n"
-    "Output format requirements:\n"
-    "- Use normalized coordinates for `align_point`, with values ranging from 0 to 1000, mapping "
-    "directly to this image's width (x) and height (y).\n"
-    "- `gripper_angle_deg` is an absolute angle in degrees, not normalized.\n"
-    "- Candidates must cover distinct grasp locations to maximize robustness.\n"
+    "5. Optional width: if you can estimate it, output `width_mm` per candidate; otherwise omit it.\n"
+    "6. Self-check: before finalising, verify that no two candidates are within 80 normalized units "
+    "of each other in `align_point`. If any pair is too close, move one to a more distant zone.\n\n"
+    "Output format requirements (server-enforced — violations cause a hard parse error):\n"
+    "- `align_point` must be [y, x] — exactly 2 numeric elements, no more, no less.\n"
+    "- Normalized coordinate range is 0 to 1000 for both axes (0 = top/left edge, 1000 = bottom/right edge). "
+    "Values outside [0, 1000] are out-of-bounds and will be rejected.\n"
+    "- `align_point` must land on a solid, visible surface of the target object — not on the background, "
+    "air, a transparent region, or a reflective surface that has no real depth. "
+    "The server samples depth in a 5×5 pixel window around the point; if no valid depth exists there "
+    "the candidate is rejected. Prefer the thickest, most opaque part of the object.\n"
+    "- `gripper_angle_deg` must be a plain number (int or float). Do not wrap it in quotes or a list.\n"
+    "- `width_mm` is optional. If included it must be a positive number strictly greater than 0. "
+    "If you cannot estimate it, omit the field entirely — do not set it to 0 or null.\n"
+    "- `candidates` must be a non-empty JSON array even when only one candidate is requested.\n"
+    "- Each candidate's `reasoning` must name its body zone and explain how it differs from the "
+    "other candidates (location, angle, or contact geometry).\n"
     "- The output format must be JSON:\n"
     '{{"target": "{task_spec}", "candidates": [{{"rank": 1, "align_point": [y, x], '
     '"gripper_angle_deg": <number>, "width_mm": <number, optional>, '
-    '"reasoning": "Briefly explain"}}]}}\n'
+    '"reasoning": "Zone: <zone name>. <Why this point and how it differs from others.>"}}]}}\n'
 )
-
-
-def build_align_prompt(task_spec: str, w: int, h: int) -> str:
-    """Prompt for the lightweight 2D alignment-point flow (single point + gripper angle)."""
-    return ALIGN_POINT_PROMPT_TEMPLATE.format(task_spec=task_spec.strip(), w=w, h=h)
 
 
 def build_align_prompt_multi(task_spec: str, w: int, h: int, num_candidates: int) -> str:

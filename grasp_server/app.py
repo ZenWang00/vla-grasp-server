@@ -27,9 +27,9 @@ import numpy as np
 from PIL import Image
 
 from vg_pipeline import new_run_id
-from vg_pipeline.align import parse_align_result, parse_align_results_multi
+from vg_pipeline.align import parse_align_results_multi
 from vg_pipeline.io import load_observation_npy, resolve_capture_dir
-from vg_pipeline.prompting import build_align_prompt, build_align_prompt_multi
+from vg_pipeline.prompting import build_align_prompt_multi
 from vg_pipeline.providers import run_vg_inference
 
 from .align_grasp import build_align_grasp
@@ -344,30 +344,17 @@ def _run_align_pipeline(
     rgb = np.asarray(Image.open(scene_path).convert("RGB"), dtype=np.uint8)
     h, w = int(depth.shape[0]), int(depth.shape[1])
 
-    if num_candidates == 1:
-        prompt = build_align_prompt(task_spec, w, h)
-        raw_model_text = run_vg_inference(
-            provider=provider,
-            images=[Image.fromarray(rgb)],
-            task_spec=task_spec,
-            model_path=model,
-            openai_image_mime_types=["image/png"],
-            gemini_image_mime_types=["image/png"],
-            prompt=prompt,
-        )
-        parsed_list = [parse_align_result(raw_model_text, canvas_h=h, canvas_w=w, rgb_h=h)]
-    else:
-        prompt = build_align_prompt_multi(task_spec, w, h, num_candidates)
-        raw_model_text = run_vg_inference(
-            provider=provider,
-            images=[Image.fromarray(rgb)],
-            task_spec=task_spec,
-            model_path=model,
-            openai_image_mime_types=["image/png"],
-            gemini_image_mime_types=["image/png"],
-            prompt=prompt,
-        )
-        parsed_list = parse_align_results_multi(raw_model_text, canvas_h=h, canvas_w=w, rgb_h=h)
+    prompt = build_align_prompt_multi(task_spec, w, h, num_candidates)
+    raw_model_text = run_vg_inference(
+        provider=provider,
+        images=[Image.fromarray(rgb)],
+        task_spec=task_spec,
+        model_path=model,
+        openai_image_mime_types=["image/png"],
+        gemini_image_mime_types=["image/png"],
+        prompt=prompt,
+    )
+    parsed_list = parse_align_results_multi(raw_model_text, canvas_h=h, canvas_w=w, rgb_h=h)
 
     grasps: list[dict[str, Any]] = []
     for parsed in parsed_list:
