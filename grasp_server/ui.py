@@ -158,19 +158,19 @@ UI_HTML = """<!DOCTYPE html>
         <input type="number" id="top_k" value="1" min="1" max="10">
       </div>
     </div>
-    <button id="run-btn" onclick="runGrasp()">Run Grasp</button>
+    <button id="run-btn" onclick="runGrasp()">Generate Grasps</button>
 
-    <div class="section-label">Run Align (VLM 2D point)</div>
+    <div class="section-label">Quick Align (VLM 2D point)</div>
     <div class="row">
       <div class="field">
         <label for="align_num_candidates">Align candidates</label>
         <input type="number" id="align_num_candidates" value="1" min="1" max="10">
       </div>
     </div>
-    <button id="align-btn" onclick="runAlign()">Run Align (2D point)</button>
+    <button id="align-btn" onclick="runAlign()">Quick Align</button>
 
 <div id="status-msg"></div>
-    <button id="ik-btn" onclick="triggerIkCheck()">&#10003; IK Check + Execute</button>
+    <button id="ik-btn" onclick="triggerIkCheck()">&#10003; Plan &amp; Execute</button>
     <div id="ik-status"></div>
     <button id="view3d-btn" onclick="window.open('/grasp_viz_3d','_blank')">&#9706; View 3D Point Cloud</button>
 
