@@ -248,13 +248,11 @@ Notes:
 
 ## Grasp HTTP API server
 
-The end-to-end pipeline is also exposed as a single HTTP endpoint so the future ROS2 node only needs to upload an RGBD frame and parse a JSON response.
+### Architecture overview
 
-Architecture:
+A FastAPI process runs inside this repo's `.venv` and exposes a **Web UI** (served at `GET /`) plus a set of REST endpoints used by the Web UI and the ROS2 `GraspPoseClientNode` in parallel.
 
-- A FastAPI process runs inside this repo's `.venv` and serves `POST /grasp` and `GET /health`.
-- A long-lived `cgn_worker.py` subprocess is launched at startup inside the `contact_graspnet` conda env. It loads the Contact-GraspNet model once and reads inference requests over stdin/stdout as JSON lines.
-- An `asyncio.Lock` serializes the full handler so the VLM, SAM2 and Contact-GraspNet stages never compete for the GPU.
+A long-lived `cgn_worker.py` subprocess is launched at startup inside the `contact_graspnet` conda env. It loads the Contact-GraspNet model once and receives inference requests over stdin/stdout as JSON lines. An `asyncio.Lock` serializes each generation request so the VLM, SAM2, and Contact-GraspNet stages never compete for the GPU.
 
 ### Launch
 
@@ -266,109 +264,126 @@ export GEMINI_API_KEY=YOUR_KEY   # or GOOGLE_API_KEY
 Environment overrides (see `scripts/run_server.sh`):
 
 - `GRASP_SERVER_HOST` / `GRASP_SERVER_PORT` (default `0.0.0.0` / `8765`)
-- `GRASP_SERVER_OUTPUT_BASE` (default `output_vg/`; each request writes one `api_<run_id>/` subdir, same as the CLI flow)
+- `GRASP_SERVER_OUTPUT_BASE` (default `output_vg/`; each run writes one subdir)
 - `GRASP_SERVER_PROVIDER` / `GRASP_SERVER_MODEL` (default `gemini` / `gemini-robotics-er-1.6-preview`)
 - `CONTACT_GRASPNET_REPO` / `CONTACT_GRASPNET_ENV` / `CONTACT_GRASPNET_CKPT` — shared with `scripts/run_vg_and_contact_graspnet.sh`
 - `CONTACT_GRASPNET_PYTHON` — optional explicit python interpreter to skip `conda run`
 
-### `POST /grasp` (multipart/form-data)
+### Multi-phase workflow
 
-| field | type | required | notes |
-| --- | --- | --- | --- |
-| `rgb` | file | yes | PNG/JPG, H×W×3 uint8 |
-| `depth` | file | yes | `.npy` saved via `numpy.save`, float32 H×W in meters |
-| `K` | form | yes | JSON-encoded 3×3 intrinsics, e.g. `"[[fx,0,cx],[0,fy,cy],[0,0,1]]"` |
-| `task_spec` | form | yes | natural-language target, e.g. `"Target: the cup"` |
-| `frame_id` | form | yes | TF frame the returned poses live in; ROS2 client copies this from the source `Image` message header (e.g. `camera_color_optical_frame` for `realsense2_camera`) |
-| `top_k` | form | no | how many grasps to return, default `1` |
-| `num_candidates` | form | no | how many `grasp_region_box` proposals the VLM emits, default `1` |
-| `provider` / `model` | form | no | per-request overrides for the VLM backend |
+The normal end-to-end flow involves six phases coordinated between the Web UI, the server, and the ROS2 client node:
 
-`rgb` and `depth` must share the same `(H, W)`.
+```
+Phase 1 — Capture
+  Web UI  →  POST /request_capture          set capture_requested flag
+  ROS2    →  GET  /poll_capture_request      (2 Hz) consume flag
+  ROS2    →  POST /upload_capture           upload rgb + depth + K + frame_id
 
-Response 200:
+Phase 2 — Grasp generation (choose one)
+  Web UI  →  POST /run_grasp                Option A: VLM + SAM2 + Contact-GraspNet
+  Web UI  →  POST /run_align               Option B: VLM align-point only (no SAM2/CGN)
 
-```json
-{
-  "run_id": "20260520_213000_123456",
-  "run_dir": "/abs/path/output_vg/api_20260520_213000_123456",
-  "frame_id": "camera_optical_frame",
-  "elapsed_ms": 9123,
-  "rgb_shape": [720, 1280, 3],
-  "depth_shape": [720, 1280],
-  "num_candidates": 1,
-  "top_k": 1,
-  "grasps": [
-    {
-      "score": 0.869,
-      "pose_4x4": [[...],[...],[...],[...]],
-      "position_xyz": [x, y, z],
-      "quaternion_xyzw": [qx, qy, qz, qw],
-      "width_m": 0.067,
-      "approach_dir_xyz": [ax, ay, az],
-      "source": {
-        "candidate_index": 0,
-        "segment_id": 1,
-        "grasp_index": 167,
-        "predictions_npz": "predictions_contact_graspnet_input_000.npz"
-      }
-    }
-  ]
-}
+Phase 3 — Server-side pre-IK filter
+  Web UI  →  POST /trigger_ik_check
+             server runs filter_grasps() (hard width/collision + soft scores)
+             queues filtered grasps as pending_publish with mode="ik_check"
+
+Phase 4 — ROS2 IK feasibility check
+  ROS2    →  GET  /poll_publish             picks up mode="ik_check" payload
+             runs Pinocchio two-stage IK for each candidate
+  ROS2    →  POST /submit_ik_result         returns IK-passing grasps
+
+Phase 5 — Best-grasp selection
+  Web UI  →  GET  /ik_result_status         poll until ready=true
+  Web UI  →  POST /select_and_execute       rank_grasps() → composite score → best
+             queues best grasp as pending_publish with mode="execute"
+
+Phase 6 — Execution
+  ROS2    →  GET  /poll_publish             picks up mode="execute" payload
+             transforms best grasp camera→base frame, publishes PoseStamped/PoseArray
 ```
 
-Pose convention (camera frame, same as Contact-GraspNet):
+### Capture endpoints
 
-- `pose_4x4` column 0 = gripper **x / base** (closing direction)
-- column 1 = **y / lateral**
-- column 2 = **z / approach** (the direction the gripper enters the contact)
-- `quaternion_xyzw` is derived from the 3×3 rotation; the future ROS2 node can drop it directly into `geometry_msgs/Pose`.
+| Endpoint | Caller | Description |
+| --- | --- | --- |
+| `POST /request_capture` | Web UI | Sets server flag asking ROS2 to take a snapshot |
+| `GET /poll_capture_request` | ROS2 (2 Hz) | Returns `{requested: true}` once, then clears flag |
+| `POST /upload_capture` | ROS2 | Uploads `rgb` (PNG/JPG), `depth` (.npy float32 H×W m), `K` (JSON 3×3), `frame_id` |
+| `GET /capture_status` | Web UI | Returns `{uploaded_at}` timestamp of last capture |
+| `POST /push_frame` | ROS2 | Push a live JPEG for the Web UI preview stream |
+| `GET /latest_frame` | Web UI | Returns the most recent JPEG from ROS2 |
 
-Errors:
+### Generation endpoints
 
-- `400` — invalid request body (shape mismatch, malformed K, missing task_spec, …)
-- `502` — Contact-GraspNet worker reported an error
-- `503` — worker not yet ready (e.g. failed to load weights)
+#### `POST /run_grasp` — Option A: VLM + SAM2 + Contact-GraspNet
+
+| field | type | default | notes |
+| --- | --- | --- | --- |
+| `task_spec` | form | required | natural-language target, e.g. `"grasp the cup"` |
+| `num_candidates` | form | `1` | VLM `grasp_region_box` proposals |
+| `top_k` | form | `1` | top-K grasps to return |
+| `provider` / `model` | form | server default | per-request VLM override |
+
+Response 200: `{run_id, run_dir, frame_id, elapsed_ms, num_candidates, top_k, grasps[], grasp_viz}`
+
+#### `POST /run_align` — Option B: VLM align-point only (lightweight)
+
+Same form fields as `/run_grasp` except no `top_k`. The VLM returns a 2D alignment point + gripper angle; the server back-projects the depth to get a 6-DoF pose. Approach direction is fixed to camera `+Z`. Does not use SAM2 or Contact-GraspNet.
+
+Response 200: same schema as `/run_grasp`.
+
+#### GraspDict schema (items in `grasps[]`)
+
+| field | type | notes |
+| --- | --- | --- |
+| `score` | float | pipeline-specific quality proxy |
+| `model_confidence` | float \| null | CGN confidence (Option A only) |
+| `pose_4x4` | 4×4 list | camera-frame SE(3); col-0=closing, col-1=lateral, col-2=approach, col-3=position |
+| `position_xyz` | [x, y, z] | camera frame, metres |
+| `quaternion_xyzw` | [qx, qy, qz, qw] | derived from pose_4x4 rotation |
+| `width_m` | float | gripper opening width in metres |
+| `approach_dir_xyz` | [ax, ay, az] | unit approach vector (camera frame) |
+| `source` | dict | `candidate_index`, `segment_id`, `grasp_index`, `predictions_npz` |
+
+### Filter / IK / scoring endpoints
+
+| Endpoint | Caller | Description |
+| --- | --- | --- |
+| `POST /trigger_ik_check` | Web UI | Pre-filter grasps (width + collision hard filters, soft scores); returns `{trace_id, num_before_filter, num_after_filter}` |
+| `GET /ik_result_status?trace_id=…` | Web UI (poll) | `{ready, count}` — ready when ROS2 has submitted IK results |
+| `POST /submit_ik_result` | ROS2 | Body: `{run_id, trace_id, grasps: [IK-passing GraspDicts]}` |
+| `POST /select_and_execute` | Web UI | Body: `{trace_id}` — scores IK-passing grasps, picks best, queues for execution; returns `{best_index, scored_grasps, ranked_indices}` |
+| `GET /poll_publish` | ROS2 (2 Hz) | Returns `{mode, grasps[], trace_id, …}` once then clears; `mode` is `"ik_check"` or `"execute"` |
+
+### Visualisation endpoints
+
+| Endpoint | Description |
+| --- | --- |
+| `GET /latest_image` | Most recent capture RGB |
+| `GET /grasp_viz_image` | 2-D grasp-arrow overlay on last capture |
+| `GET /grasp_viz_best_image` | Gold-arrow best-grasp overlay (after select_and_execute) |
+| `GET /grasp_viz_3d` | Interactive 3-D point-cloud + grasp frames (HTML) |
 
 ### `GET /health`
 
-Returns `{status, worker_ready, worker_pid, last_request_ms, last_run_dir, config, recent_worker_stderr}`. Useful to confirm the persistent CGN worker is up before sending real frames.
+Returns `{status, worker_ready, worker_pid, last_request_ms, last_run_dir, config, recent_worker_stderr}`.
+
+### Legacy single-shot endpoint
+
+`POST /grasp` (multipart: `rgb`, `depth`, `K`, `task_spec`, `frame_id`, `top_k`, `num_candidates`) runs the full Option A pipeline in one request and returns grasps directly. This endpoint bypasses the capture / IK-check / execution phases and is kept for smoke-testing and backward compatibility.
 
 ### Smoke test (recommended)
 
 `scripts/smoke_test_grasp.py` loads an existing capture folder, calls `/health`
-to check the worker is up, then POSTs to `/grasp` exactly the way the future
-ROS2 client will. Use it before bringing up ROS2 to isolate server-side issues:
+to confirm the CGN worker is up, then POSTs to the legacy `/grasp` endpoint to
+isolate server-side issues before bringing up ROS2:
 
 ```bash
 .venv/bin/python scripts/smoke_test_grasp.py \
     --capture-dir captures/20260417_120019 \
     --task-spec "Target: the blue bottle"
 ```
-
-A successful run prints `health: status=ok, worker_ready=True`, the run_id,
-artifact path (`output_vg/api_<run_id>/report.html`), and a one-line summary of
-each top-K grasp (score / position / quaternion / width).
-
-### Smoke test with raw curl
-
-```bash
-.venv/bin/python -c "import numpy as np; d=np.load('captures/20260417_120019/camera_data.npy', allow_pickle=True).item(); np.save('/tmp/depth.npy', d['depth'])"
-.venv/bin/python -c "import numpy as np, json; d=np.load('captures/20260417_120019/camera_data.npy', allow_pickle=True).item(); print(json.dumps(d['K'].tolist()))" > /tmp/K.json
-
-curl -X POST http://localhost:8765/grasp \
-  -F "rgb=@captures/20260417_120019/color_preview.jpg" \
-  -F "depth=@/tmp/depth.npy" \
-  -F "K=$(cat /tmp/K.json)" \
-  -F "task_spec=Target: the blue bottle" \
-  -F "frame_id=camera_color_optical_frame" \
-  -F "top_k=1"
-```
-
-### Notes / scope
-
-- ROS2 is out of scope here. The future ROS2 node is responsible for converting `quaternion_xyzw` + `position_xyz` into `geometry_msgs/PoseStamped`, attaching `frame_id`, and any further frame remap (e.g. flipping the approach axis for `tool0`).
-- Each request still writes the same `output_vg/api_<run_id>/` artifacts the CLI produces, so the existing `generate_grasp_report.py` workflow can be used to debug an API call after the fact.
 
 ### What is sent to the VLM
 
@@ -379,6 +394,6 @@ Sent remotely:
 
 Not sent remotely:
 
-- depth map from `.npy`
+- depth map
 - camera intrinsics `K`
-- local ROI point-cloud outputs
+- local ROI / point-cloud outputs
