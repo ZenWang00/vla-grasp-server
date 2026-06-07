@@ -355,8 +355,12 @@ def filter_grasps(
             continue
 
         # --- Hard threshold + soft score: collision ---
+        # Align-path grasps (predictions_npz=None) use a fixed approach=+Z, which makes
+        # the palm-space slab overlap with arbitrary scene points.  Skip the hard reject
+        # for these; keep the soft score so the scorer can still penalise bad poses.
+        is_align = grasp.get("source", {}).get("predictions_npz") is None
         col_passes, col_score = _score_collision(grasp, depth, K, cfg)
-        if not col_passes:
+        if not col_passes and not is_align:
             rejected_collision.append(i)
             continue
 
