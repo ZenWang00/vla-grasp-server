@@ -90,8 +90,8 @@ sequenceDiagram
     end
 
     ROS2->>ROS2: _transform_to_base(best_grasp, T_camera→base)<br/>+ grasp_offset_base (systematic error compensation)
-    ROS2->>Robot: ~/best_grasp (PoseStamped, LIO_robot_base_link)
-    ROS2->>Robot: ~/grasps (PoseArray, LIO_robot_base_link)
+    ROS2->>Robot: ~/best_grasp (PoseStamped, LIO_base_link)
+    ROS2->>Robot: ~/grasps (PoseArray, LIO_base_link)
     ROS2->>ROS2: broadcast TF: grasp_best / grasp_best_cam (RViz visualisation)
 ```
 
@@ -169,7 +169,7 @@ flowchart TD
 
     subgraph EXEC["Execution (ROS2 2 Hz poll)"]
         E1[GET /poll_publish\n→ mode: execute] --> E2[_transform_to_base\nbest_grasp → base frame\n+ grasp_offset_base error compensation]
-        E2 --> E3[~/best_grasp\nPoseStamped\nLIO_robot_base_link]
+        E2 --> E3[~/best_grasp\nPoseStamped\nLIO_base_link]
         E2 --> E4[~/grasps\nPoseArray]
         E2 --> E5[broadcast TF\ngrasp_best frame\nRViz visualisation]
     end
@@ -210,7 +210,7 @@ flowchart LR
     end
 
     subgraph PUB["ROS2 Publish (execute)"]
-        P1["Base-frame transform\n─────────────\nT = TF(camera→LIO_base_link)\npose_base = T @ pose_4x4_cam\n+ grasp_offset_base\n\n→ PoseStamped (LIO_robot_base_link)\n→ PoseArray"]
+        P1["Base-frame transform\n─────────────\nT = TF(camera→LIO_base_link)\npose_base = T @ pose_4x4_cam\n+ grasp_offset_base\n\n→ PoseStamped (LIO_base_link)\n→ PoseArray"]
     end
 
     G1 -->|hard filters + soft scores| F1
