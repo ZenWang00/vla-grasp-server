@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from vg_pipeline import new_run_id, resolve_output_dir, run_pipeline
+from vg_pipeline import DEFAULT_CGN_DEPTH_CLIP_M, new_run_id, resolve_output_dir, run_pipeline
 
 __all__ = ["main", "new_run_id", "resolve_output_dir", "run_pipeline"]
 
@@ -123,6 +123,13 @@ def main() -> None:
         "segmap=tight_grasp_mask, and an extra global_mask key when SAM2 global succeeds.",
     )
     parser.add_argument(
+        "--cgn-depth-clip",
+        type=float,
+        default=DEFAULT_CGN_DEPTH_CLIP_M,
+        help="Far-background cutoff (meters) for the depth exported to Contact-GraspNet. "
+        "Depth beyond this is zeroed; the full scene (incl. table) within it is kept.",
+    )
+    parser.add_argument(
         "--contact-graspnet-export-template",
         type=str,
         default="contact_graspnet_input_{idx:03d}.npz",
@@ -179,6 +186,7 @@ def main() -> None:
         sam2_device=args.sam2_device,
         export_contact_graspnet_input=args.export_contact_graspnet_input,
         contact_graspnet_export_template=args.contact_graspnet_export_template,
+        cgn_depth_clip_m=args.cgn_depth_clip,
         run_id=run_id,
         scene_image_path=args.scene_image.resolve() if args.scene_image else None,
         depth_aux_image_path=args.depth_aux_image.resolve() if args.depth_aux_image else None,

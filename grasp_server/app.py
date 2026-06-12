@@ -642,6 +642,7 @@ async def trigger_ik_check() -> JSONResponse:
             detail=(
                 f"all {filter_report.total} grasps rejected by pre-IK filter "
                 f"(width={len(filter_report.rejected_width)}, "
+                f"approach={len(filter_report.rejected_approach)}, "
                 f"clearance={len(filter_report.rejected_clearance)}, "
                 f"collision={len(filter_report.rejected_collision)})"
             ),

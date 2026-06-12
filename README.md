@@ -127,7 +127,7 @@ For each candidate, the tight grasp mask is combined with the full-frame depth +
 
 When `--export-contact-graspnet-input` is set, the pipeline writes one NPZ per candidate (`contact_graspnet_input_NNN.npz` by default). Each NPZ contains:
 
-- `depth`, `K`
+- `depth` (full scene, far background beyond `--cgn-depth-clip` — default 1.5 m — zeroed), `K`
 - `rgb` (BGR, matches the existing Contact-GraspNet loader convention)
 - `segmap = tight_grasp_mask` for that candidate — Contact-GraspNet's segment-only branch then isolates grasps to the graspable part
 - `global_mask` (extra key) — the SAM2 Global whole-object mask, carried through for downstream collision / context use
@@ -138,7 +138,7 @@ Important:
 - file naming is controlled by `--contact-graspnet-export-template` (default `contact_graspnet_input_{idx:03d}.npz`); the template must contain `{idx`
 - Contact-GraspNet itself is not invoked here; the NPZs are consumed by an external Contact-GraspNet environment
 - `segmap` is the tight grasp mask (SAM2 local, clipped to the VLM `grasp_region_box`), not the whole-object `global_mask`
-- exported `depth` is zeroed outside the tight mask so CGN's scene point cloud cannot pull in the full object / table context
+- exported `depth` is the **full scene** clipped at `--cgn-depth-clip` (default 1.5 m): CGN needs the support plane (table) in its point cloud to suppress bottom-up approach directions — its training only avoids grasps that pass through visible scene points. Target focusing is still guaranteed by `segmap` via `local_regions` / `filter_grasps`
 - `global_mask` is stored only as extra metadata for downstream planners; CGN's loader ignores unknown keys
 
 When running Contact-GraspNet `inference.py`, prefer predicting on the segmented point cloud only (not the default 0.2–0.6 m scene cube). In `contact_graspnet_pytorch/contact_graspnet_pytorch/inference.py`, call `predict_scene_grasps(..., local_regions=True, filter_grasps=True, use_cam_boxes=False)` or patch the script accordingly so `pc_regions` comes from `filter_pc_segments(pc_segments)` instead of `extract_3d_cam_boxes(full_pc, ...)`.

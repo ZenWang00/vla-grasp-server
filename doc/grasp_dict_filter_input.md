@@ -30,7 +30,7 @@ describes the exact schema entering the filter and how each pipeline populates e
 
 ### Fields NOT present before filtering
 
-These three fields are `None`/absent on entry and are added by `filter_grasps` to each
+These fields are `None`/absent on entry and are added by `filter_grasps` to each
 grasp that survives the hard filters:
 
 | Field | Added by filter | Range | Meaning |
@@ -38,6 +38,12 @@ grasp that survives the hard filters:
 | `clearance_score` | yes | [0, 1] | Approach-path depth clearance score |
 | `collision_score` | yes | [0, 1] | Inverse gripper–point-cloud penetration score |
 | `contact_quality_score` | yes | [0, 1] | Contact-point surface-normal alignment score |
+| `approach_camera_cos` | yes | [-1, 1] | Debug value: `dot(approach_dir, camera +Z)`; grasps below `cos(max_approach_angle_deg)` are hard-rejected (`rejected_approach`) |
+
+Hard rejects (indices recorded in `GraspFilterReport`): `rejected_width` (width
+outside gripper bounds), `rejected_approach` (approach axis more than
+`max_approach_angle_deg`, default 90°, away from camera `+Z` — i.e. pointing back
+toward the camera), `rejected_collision` (penetration above `max_penetration_m`).
 
 ---
 
@@ -217,7 +223,7 @@ not appear in `GraspFilterReport.passed`.
 
 ## Post-filter schema (grasps in `GraspFilterReport.passed`)
 
-Grasps that survive all hard filters are shallow-copied and annotated with three new
+Grasps that survive all hard filters are shallow-copied and annotated with new
 float fields before being placed in `passed`:
 
 ```json
@@ -232,11 +238,12 @@ float fields before being placed in `passed`:
   "source": {"...same as input..."},
   "clearance_score": 0.84,
   "collision_score": 1.00,
-  "contact_quality_score": 0.71
+  "contact_quality_score": 0.71,
+  "approach_camera_cos": 0.856
 }
 ```
 
-These three scores are the inputs read by `grasp_scorer.rank_grasps()` during
+The three `*_score` fields are the inputs read by `grasp_scorer.rank_grasps()` during
 `/select_and_execute`. Grasps that bypass `filter_grasps` (e.g. in tests) fall back
 to `0.0` for all three (conservative/worst-case).
 
