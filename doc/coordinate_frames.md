@@ -134,8 +134,11 @@ a 2D point and an in-plane angle, not a full 3D orientation.
 
 The SAM2 mask is back-projected to a point cloud (camera frame), then exported as an
 NPZ file whose key `input_points` is an `(N, 3)` float32 array in the camera optical
-frame.  Contact-GraspNet operates entirely in the camera frame and writes predictions
-back in the same frame:
+frame.  The exported `depth` is the **full scene** with far background beyond
+`cgn_depth_clip_m` (default 1.5 m) zeroed — the support plane (table) must be in the
+point cloud so CGN suppresses bottom-up approach directions; the `segmap` focuses
+`local_regions` / `filter_grasps` on the target.  Contact-GraspNet operates entirely
+in the camera frame and writes predictions back in the same frame:
 
 - `pred_grasps_cam[seg_id][grasp_idx]` — 4×4 float32, camera frame
 - `scores[seg_id][grasp_idx]` — scalar confidence
@@ -167,6 +170,13 @@ camera-frame depth image and intrinsics **K** together with the camera-frame `po
 | `contact_quality_score` | Camera-frame surface normals vs approach direction |
 
 All scores are computed in the camera frame.  No frame transformation occurs here.
+
+In addition to the width hard filter, an **approach-direction hard filter** rejects
+grasps whose approach axis exceeds `max_approach_angle_deg` (default 90°) from the
+camera `+Z` axis — i.e. grasps that would reach the object from behind, toward the
+camera.  The check is camera-frame only (no extrinsics needed); the value
+`dot(approach, [0,0,1])` is stored on passing grasps as `approach_camera_cos`.
+Option C grasps always pass (their approach is exactly `[0,0,1]`).
 
 The collision hard-reject is **skipped** for Option C grasps (`source.predictions_npz
 is None`) because their fixed `approach=[0,0,1]` produces systematic false positives in
@@ -336,3 +346,4 @@ if q[3] < 0.0:
 | **IK result not stored** | The base-frame transform computed during IK is discarded after the feasibility check. The execution phase recomputes it from a second TF lookup. A TF change between the two lookups (e.g. if the robot base is on a mobile platform) can introduce a small inconsistency. |
 | **grasp_offset_base** | Applied only during execution, not during IK. If the offset is large it can cause an IK-passing grasp (checked without offset) to become unreachable after the offset is applied. Keep this value small (< 2 cm typical). |
 | **Camera-frame scores** | All soft scores (`clearance_score`, `collision_score`, `contact_quality_score`) are evaluated in the camera frame using the depth image. They do not account for occlusions or objects behind the robot's reach boundary; that filtering is delegated entirely to the IK step. |
+| **Approach hard filter is camera-frame** | The `max_approach_angle_deg` reject compares the approach axis against camera `+Z`, not gravity. It is valid for a camera mount facing the workspace; it does not by itself prefer top-down grasps in the robot base frame (the table in the CGN point cloud handles that). |

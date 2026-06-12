@@ -4,6 +4,9 @@ Called from /trigger_ik_check before GEN output is sent to the ROS2 IK checker.
 
 Hard constraints (boolean, physically impossible → drop):
   - width: object wider than max gripper opening
+  - approach: approach axis points back toward the camera (gripper would have to
+    reach the object from behind, which is unreachable for a camera facing the
+    workspace)
 
 Soft metrics (continuous [0,1], stored in GraspDict for scorer to read):
   - clearance_score:       approach path depth clearance
@@ -13,8 +16,8 @@ Soft metrics (continuous [0,1], stored in GraspDict for scorer to read):
 Collision also has a secondary hard threshold (max_penetration_m): grasps with
 excessive penetration are rejected even if clearance/contact are fine.
 
-Filter order (cheapest-first): width → collision (hard+score) → clearance (score)
-  → contact_quality (score).
+Filter order (cheapest-first): width → approach (hard) → collision (hard+score)
+  → clearance (score) → contact_quality (score).
 
 All operations are CPU-only numpy; never touches the GPU.
 """
@@ -41,6 +44,7 @@ class GraspFilterConfig:
     depth_trunc_m: float          # depth values above this treated as missing
     collision_voxel_size_m: float # voxel resolution for collision check
     max_penetration_m: float      # hard-reject if gripper penetrates point cloud by more than this
+    max_approach_angle_deg: float # hard-reject if angle(approach, camera +Z) exceeds this
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,7 @@ class GraspFilterReport:
     rejected_width: list[int]    # indices (into original list) rejected by width check
     rejected_clearance: list[int] # always empty (clearance is soft-only); kept for API compat
     rejected_collision: list[int] # indices rejected by collision hard threshold
+    rejected_approach: list[int]  # indices rejected by approach-direction check
     num_passed: int              # len(passed) — convenience field
 
 
@@ -60,6 +65,9 @@ _DEFAULT_CONFIG = GraspFilterConfig(
     depth_trunc_m=1.5,
     collision_voxel_size_m=0.005,
     max_penetration_m=0.005,
+    # 90° rejects exactly the toward-camera class (dot < 0) without touching
+    # legitimate side grasps under a tilted camera; tighten if grazing grasps survive.
+    max_approach_angle_deg=90.0,
 )
 
 
@@ -72,6 +80,37 @@ def check_width(grasp: dict[str, Any], cfg: GraspFilterConfig) -> bool:
     if w is None:
         return False
     return cfg.min_width_m <= float(w) <= cfg.max_width_m
+
+
+def check_approach(grasp: dict[str, Any], cfg: GraspFilterConfig) -> tuple[bool, float]:
+    """Camera-frame approach-direction check.
+
+    The gripper must approach from the camera side, i.e. the approach axis
+    (camera optical frame) must stay within cfg.max_approach_angle_deg of the
+    camera +Z axis.  Grasps reaching the object from behind (approach pointing
+    back toward the camera) are unreachable and rejected.
+
+    Returns:
+        (passes, cos_value) where cos_value = dot(approach_unit, [0,0,1]).
+        Missing/degenerate approach data → (False, 0.0) (conservative, like
+        check_width's None handling).
+    """
+    raw = grasp.get("approach_dir_xyz")
+    if raw is None:
+        pose = grasp.get("pose_4x4")
+        if pose is None:
+            return (False, 0.0)
+        raw = np.asarray(pose, dtype=np.float64)[:3, 2]
+    try:
+        approach = np.asarray(raw, dtype=np.float64).reshape(3)
+    except (TypeError, ValueError):
+        return (False, 0.0)
+    norm = float(np.linalg.norm(approach))
+    if norm < 1e-8 or not np.isfinite(norm):
+        return (False, 0.0)
+    cos_val = float(approach[2] / norm)
+    threshold = float(np.cos(np.radians(cfg.max_approach_angle_deg)))
+    return (cos_val >= threshold, cos_val)
 
 
 def _backproject_depth(
@@ -326,15 +365,17 @@ def filter_grasps(
     K: np.ndarray,
     cfg: GraspFilterConfig | None = None,
 ) -> GraspFilterReport:
-    """Apply hard width filter + collision hard threshold; compute soft scores for passing grasps.
+    """Apply hard width/approach filters + collision hard threshold; compute soft scores for passing grasps.
 
-    Order: width (hard) → collision (hard + score) → clearance (score) → contact_quality (score).
+    Order: width (hard) → approach (hard) → collision (hard + score) → clearance (score)
+    → contact_quality (score).
     A grasp only advances to the next check if it passed all previous hard filters.
 
     Soft scores are stored back into the GraspDict copy:
       grasp["clearance_score"]       float [0, 1]
       grasp["collision_score"]       float [0, 1]
       grasp["contact_quality_score"] float [0, 1]
+      grasp["approach_camera_cos"]   float [-1, 1] (debug: dot(approach, camera +Z))
 
     cfg=None uses _DEFAULT_CONFIG.
     """
@@ -345,6 +386,7 @@ def filter_grasps(
     K = np.asarray(K, dtype=np.float64)
 
     rejected_width: list[int] = []
+    rejected_approach: list[int] = []
     rejected_collision: list[int] = []
     passed: list[dict] = []
 
@@ -352,6 +394,12 @@ def filter_grasps(
         # --- Hard: width ---
         if not check_width(grasp, cfg):
             rejected_width.append(i)
+            continue
+
+        # --- Hard: approach direction (camera frame) ---
+        app_passes, app_cos = check_approach(grasp, cfg)
+        if not app_passes:
+            rejected_approach.append(i)
             continue
 
         # --- Hard threshold + soft score: collision ---
@@ -373,6 +421,7 @@ def filter_grasps(
         annotated["clearance_score"] = clr_score
         annotated["collision_score"] = col_score
         annotated["contact_quality_score"] = ctq_score
+        annotated["approach_camera_cos"] = app_cos
         passed.append(annotated)
 
     return GraspFilterReport(
@@ -381,5 +430,6 @@ def filter_grasps(
         rejected_width=rejected_width,
         rejected_clearance=[],
         rejected_collision=rejected_collision,
+        rejected_approach=rejected_approach,
         num_passed=len(passed),
     )

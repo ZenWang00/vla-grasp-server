@@ -27,6 +27,11 @@ from .sam2_segment import (
 
 DEFAULT_SCHEMA_VERSION = "vla_dual_sam2_v1"
 
+# Far-background cutoff for the depth exported to Contact-GraspNet. Matches the
+# grasp filter's depth_trunc_m (1.5) and stays below the CGN worker's z-max
+# backstop (1.8) so the exported NPZ is the single source of truth.
+DEFAULT_CGN_DEPTH_CLIP_M = 1.5
+
 
 @dataclass(frozen=True)
 class LoadedPipelineInputs:
@@ -199,6 +204,7 @@ def _run_per_candidate_stage(
     render_pointcloud_3d: bool,
     export_contact_graspnet_input: bool,
     contact_graspnet_export_template: str,
+    cgn_depth_clip_m: float = DEFAULT_CGN_DEPTH_CLIP_M,
 ) -> tuple[
     list[dict[str, int]],
     list[dict[str, Any]],
@@ -335,16 +341,14 @@ def _run_per_candidate_stage(
             # Contact-GraspNet's loader converts stored rgb from BGR to RGB, so export BGR here.
             rgb_bgr = rgb[:, :, ::-1].copy()
             depth_arr = np.asarray(depth)
-            # Use global_mask (full object) for depth context when available so CGN can
-            # reason about the complete object geometry (e.g. a hollow cup, not just a
-            # curved wall fragment). tight_segmap still directs CGN to the grasp region.
-            # Fallback to full unmasked depth when global_mask is unavailable.
-            if global_mask is not None:
-                depth_for_cgn = np.where(global_mask.astype(bool), depth_arr, 0.0).astype(
-                    depth_arr.dtype, copy=False
-                )
-            else:
-                depth_for_cgn = depth_arr.astype(depth_arr.dtype, copy=False)
+            # Export the full scene depth so CGN sees the support plane (table):
+            # CGN suppresses approach directions that pass through scene points, so
+            # without the table it proposes bottom-up grasps. Only far background
+            # beyond cgn_depth_clip_m is zeroed (CGN treats 0 as missing). Target
+            # focusing is preserved by segmap via local_regions / filter_grasps.
+            depth_for_cgn = np.where(
+                (depth_arr > 0.0) & (depth_arr <= cgn_depth_clip_m), depth_arr, 0.0
+            ).astype(depth_arr.dtype, copy=False)
             payload: dict[str, np.ndarray] = {
                 "depth": depth_for_cgn,
                 "K": np.asarray(K),
@@ -364,7 +368,8 @@ def _run_per_candidate_stage(
                     "path": export_rel,
                     "keys": keys,
                     "segmap_source": "tight_grasp_mask",
-                    "depth_masked_to_global_object": global_mask is not None,
+                    "depth_source": "full_scene_clipped",
+                    "depth_clip_m": float(cgn_depth_clip_m),
                     "global_mask_included": global_included,
                 }
             )
@@ -393,6 +398,7 @@ def run_pipeline(
     sam2_device: str | None = None,
     export_contact_graspnet_input: bool = False,
     contact_graspnet_export_template: str = "contact_graspnet_input_{idx:03d}.npz",
+    cgn_depth_clip_m: float = DEFAULT_CGN_DEPTH_CLIP_M,
     run_id: str | None = None,
     scene_image_path: str | Path | None = None,
     depth_aux_image_path: str | Path | None = None,
@@ -497,6 +503,7 @@ def run_pipeline(
         render_pointcloud_3d=render_pointcloud_3d,
         export_contact_graspnet_input=export_contact_graspnet_input,
         contact_graspnet_export_template=contact_graspnet_export_template,
+        cgn_depth_clip_m=cgn_depth_clip_m,
     )
 
     if not parsed_boxes:
