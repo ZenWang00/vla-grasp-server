@@ -1,5 +1,15 @@
 # vla-grasp-server
 
+## Project Overview
+
+This is the **Semester Project Final Release (v1.0.0)** - the grasp server component of the VLA (Vision-Language-Action) robotic grasp generation system.
+
+### Related Components
+- **Grasp Pose Generation Engine**: https://github.com/ZenWang00/Grasp-Pose-Generation
+- **Project Presentation**: https://docs.google.com/presentation/d/1xuitCtljjJ73u928OtHOnfCbR0izvSX1LKqYPRg62_A/edit?usp=sharing
+
+For a complete understanding of the system architecture and results, please refer to the presentation and the accompanying Grasp-Pose-Generation repository.
+
 ## Environment setup
 
 This repository is intended to run in its own Python environment.
