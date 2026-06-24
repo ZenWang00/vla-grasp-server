@@ -27,6 +27,7 @@ Dependency files:
 
 - `requirements.in`: direct project dependencies
 - `requirements.txt`: versions validated in the current project environment
+- `ipykernel`: required for interactive notebook development and VS Code notebook kernel support
 
 Notes:
 
