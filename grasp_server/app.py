@@ -27,7 +27,7 @@ import numpy as np
 from PIL import Image
 
 from vg_pipeline import new_run_id
-from vg_pipeline.align import parse_align_results_multi
+from vg_pipeline.align import grasp_scale_anchor, parse_align_results_multi
 from vg_pipeline.io import load_observation_npy, resolve_capture_dir
 from vg_pipeline.prompting import build_align_prompt_multi
 from vg_pipeline.providers import run_vg_inference
@@ -344,7 +344,16 @@ def _run_align_pipeline(
     rgb = np.asarray(Image.open(scene_path).convert("RGB"), dtype=np.uint8)
     h, w = int(depth.shape[0]), int(depth.shape[1])
 
-    prompt = build_align_prompt_multi(task_spec, w, h, num_candidates)
+    z_ref, max_open_px, min_open_px = grasp_scale_anchor(depth, K)
+    prompt = build_align_prompt_multi(
+        task_spec,
+        w,
+        h,
+        num_candidates,
+        max_open_px=max_open_px,
+        min_open_px=min_open_px,
+        ref_depth_m=z_ref,
+    )
     raw_model_text = run_vg_inference(
         provider=provider,
         images=[Image.fromarray(rgb)],

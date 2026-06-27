@@ -14,6 +14,12 @@ import numpy as np
 
 from .roi import _load_vlm_json, _scale_norm_xy_to_rgb
 
+# Parallel-jaw gripper opening limits. Mirror the downstream defaults in
+# grasp_server.grasp_filter (min_width_m / max_width_m) so the prompt's feasibility
+# check matches what the width filter / scorer later enforce.
+GRIPPER_MAX_OPEN_M = 0.08
+GRIPPER_MIN_OPEN_M = 0.02
+
 
 @dataclass(frozen=True)
 class AlignResult:
@@ -108,6 +114,36 @@ def sample_depth_median(
             f"no valid depth near align_point ({v}, {u}); the selected point has no depth"
         )
     return float(np.median(valid))
+
+
+def grasp_scale_anchor(
+    depth: np.ndarray,
+    K: np.ndarray,
+    *,
+    max_open_m: float = GRIPPER_MAX_OPEN_M,
+    min_open_m: float = GRIPPER_MIN_OPEN_M,
+) -> tuple[float, float, float]:
+    """Representative working depth plus jaw openings expressed in image pixels.
+
+    The pinhole pixel size at depth ``z`` is ``z / fx`` (meters per pixel), so a metric
+    opening ``open_m`` spans ``open_m * fx / z`` pixels. We anchor on a representative
+    scene depth ``z_ref`` (median of valid depth, same ``isfinite & > 0`` mask as
+    :func:`sample_depth_median`) to avoid the chicken-and-egg of needing the not-yet-chosen
+    ``align_point``'s depth. Pixels are orientation-independent, unlike the per-axis
+    normalized 0-1000 units, so this is the unit we hand the VLM.
+
+    Returns ``(z_ref_m, max_open_px, min_open_px)``.
+    """
+    depth = np.asarray(depth, dtype=np.float64)
+    valid = depth[np.isfinite(depth) & (depth > 0.0)]
+    if valid.size == 0:
+        raise ValueError("no valid depth in the scene; cannot compute a scale anchor")
+    z_ref = float(np.median(valid))
+
+    fx = float(np.asarray(K, dtype=np.float64)[0, 0])
+    max_open_px = max_open_m * fx / z_ref
+    min_open_px = min_open_m * fx / z_ref
+    return z_ref, max_open_px, min_open_px
 
 
 def deproject_pixel(u: float, v: float, z: float, K: np.ndarray) -> np.ndarray:

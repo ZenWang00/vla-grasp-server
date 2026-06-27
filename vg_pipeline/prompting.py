@@ -48,6 +48,14 @@ ALIGN_POINT_MULTI_PROMPT_TEMPLATE = (
     "- The image contains only color appearance information; no depth map is provided.\n"
     "- The robot already has a separate depth sensor; you must only locate the 2D points and the "
     "in-image gripper orientations. The 3D distance is recovered later from depth.\n\n"
+    "Gripper specification:\n"
+    "- The robot uses a parallel-jaw gripper. The approach direction is fixed perpendicular to "
+    "the image (straight into the scene); the ONLY orientation you choose is the in-image angle "
+    "at which the two jaws close.\n"
+    "- Maximum jaw opening is {gripper_max_open_mm:.0f} mm; minimum useful opening is "
+    "{gripper_min_open_mm:.0f} mm. The object's width measured along the closing direction must "
+    "fit inside this range, otherwise the grasp is infeasible.\n"
+    "{scale_reference_block}"
     "Reasoning task:\n"
     "1. Target identification: find the object/rail corresponding to \"{task_spec}\" in the image.\n"
     "2. Diversity planning (do this BEFORE choosing coordinates): mentally divide the target object "
@@ -66,7 +74,11 @@ ALIGN_POINT_MULTI_PROMPT_TEMPLATE = (
     "object and its support; prefer the middle or upper section when the geometry allows it.\n"
     "5. Gripper angle: for each candidate, output `gripper_angle_deg`, the in-image rotation (degrees) "
     "of the gripper's closing direction. 0 means fingers close along the image +x (horizontal) axis; "
-    "positive rotates toward image +y. Choose the angle so the jaws close across the narrow dimension.\n"
+    "positive rotates toward image +y. Choose the angle so the object's width measured along the "
+    "closing direction at `align_point` fits the jaw (see Gripper specification and the Scale "
+    "reference pixel sizes): prefer the orientation that closes across the dimension that fits — "
+    "usually the narrow dimension — and reject any orientation whose span clearly exceeds the "
+    "maximum opening.\n"
     "6. Self-check: before finalising, verify that no two candidates are within 80 normalized units "
     "of each other in `align_point`, and that every candidate keeps the table clearance required in "
     "step 4. If any pair is too close, move one to a more distant zone.\n\n"
@@ -80,8 +92,9 @@ ALIGN_POINT_MULTI_PROMPT_TEMPLATE = (
     "the candidate is rejected. Prefer the thickest, most opaque part of the object.\n"
     "- `gripper_angle_deg` must be a plain number (int or float). Do not wrap it in quotes or a list.\n"
     "- `candidates` must be a non-empty JSON array even when only one candidate is requested.\n"
-    "- Each candidate's `reasoning` must name its body zone and explain how it differs from the "
-    "other candidates (location, angle, or contact geometry).\n"
+    "- Each candidate's `reasoning` must name its body zone, explain how it differs from the "
+    "other candidates (location, angle, or contact geometry), and confirm the closing-direction "
+    "width fits within the jaw opening.\n"
     "- The output format must be JSON:\n"
     '{{"target": "{task_spec}", "candidates": [{{"rank": 1, "align_point": [y, x], '
     '"gripper_angle_deg": <number>, '
@@ -89,10 +102,45 @@ ALIGN_POINT_MULTI_PROMPT_TEMPLATE = (
 )
 
 
-def build_align_prompt_multi(task_spec: str, w: int, h: int, num_candidates: int) -> str:
-    """Prompt for the multi-candidate alignment-point flow."""
+def build_align_prompt_multi(
+    task_spec: str,
+    w: int,
+    h: int,
+    num_candidates: int,
+    *,
+    gripper_max_open_m: float = 0.08,
+    gripper_min_open_m: float = 0.02,
+    max_open_px: float | None = None,
+    min_open_px: float | None = None,
+    ref_depth_m: float | None = None,
+) -> str:
+    """Prompt for the multi-candidate alignment-point flow.
+
+    When ``max_open_px``/``min_open_px``/``ref_depth_m`` are supplied (computed by
+    :func:`vg_pipeline.align.grasp_scale_anchor` from depth + intrinsics), a Scale
+    reference line is added so the gripper-opening limits map to concrete pixel sizes;
+    omitting them keeps the prompt backward compatible (no scale line).
+    """
+    if max_open_px is not None and min_open_px is not None and ref_depth_m is not None:
+        scale_reference_block = (
+            f"Scale reference: at the scene's representative working depth "
+            f"(~{ref_depth_m:.2f} m) in this {w}x{h} image, the jaw's maximum opening "
+            f"{gripper_max_open_m * 1000:.0f} mm spans about {max_open_px:.0f} px and the "
+            f"minimum opening {gripper_min_open_m * 1000:.0f} mm spans about {min_open_px:.0f} px. "
+            f"Use these pixel sizes to judge whether the object's width along the closing "
+            f"direction fits the jaw.\n"
+        )
+    else:
+        scale_reference_block = ""
+
     return ALIGN_POINT_MULTI_PROMPT_TEMPLATE.format(
-        task_spec=task_spec.strip(), w=w, h=h, num_candidates=num_candidates
+        task_spec=task_spec.strip(),
+        w=w,
+        h=h,
+        num_candidates=num_candidates,
+        gripper_max_open_mm=gripper_max_open_m * 1000,
+        gripper_min_open_mm=gripper_min_open_m * 1000,
+        scale_reference_block=scale_reference_block,
     )
 
 
