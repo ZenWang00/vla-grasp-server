@@ -7,7 +7,7 @@ __pycache__/
 venv/
 
 # Local data and generated outputs
-captures/
+rgbd_data/captures/
 output_rgbd/
 output_vg/
 
