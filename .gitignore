@@ -16,3 +16,13 @@ models/
 
 # OS/editor noise
 .DS_Store
+
+# LaTeX build artifacts
+latex/out/
+*.aux
+*.fdb_latexmk
+*.fls
+*.synctex.gz
+texput.log
+latex/*.log
+latex/*.out
