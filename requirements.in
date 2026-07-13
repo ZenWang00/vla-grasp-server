@@ -1,4 +1,5 @@
 numpy
+scipy==1.18.0
 Pillow
 matplotlib
 open3d
